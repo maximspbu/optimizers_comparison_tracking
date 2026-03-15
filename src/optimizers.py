@@ -2,6 +2,15 @@ import math
 import torch
 from torch.optim import Optimizer
 
+try:
+    from galore_torch import GaLoreAdamW as _GaLoreAdamW
+
+    class GaLoreAdamW(_GaLoreAdamW):
+        pass
+
+except ImportError:
+    GaLoreAdamW = None
+
 
 class AdaBound(Optimizer):
     """Implements AdaBound algorithm.
