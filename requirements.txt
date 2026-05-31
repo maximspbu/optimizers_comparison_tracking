@@ -1,6 +1,6 @@
 # ── Core ML / DL ────────────────────────────────────────────────────────────
 torch==2.6.0
-torchvision==0.21.0
+torchvision==0.21.0          # must match torch version
 torchmetrics==1.7.0
 numpy==2.2.4
 pandas==2.2.3
@@ -16,7 +16,7 @@ lion-pytorch==0.2.4
 torch-optimizer==0.3.0
 schedulefree
 galore-torch
-adabelief-pytorch==0.2.0
+adabelief-pytorch==0.2.1
 adabound==0.0.5
 # AdEMAMix and Stacey are not on PyPI — cloned via git in Dockerfile:
 #   git clone https://github.com/nanowell/AdEMAMix-Optimizer-Pytorch
@@ -27,27 +27,21 @@ mlflow==3.12.0
 ray[tune]==2.49.2
 optuna
 psutil
-pynvml                    # GPU utilisation % via NVML
+pynvml                       # GPU utilisation % via NVML
 
 # ── Dataset downloading ──────────────────────────────────────────────────────
 openml
-kaggle                    # kaggle CLI for dataset downloads
+kaggle                       # kaggle CLI for dataset downloads
 
 # ── Visualisation ────────────────────────────────────────────────────────────
 matplotlib==3.10.1
 seaborn==0.13.2
+pillow>=10.0,<13             # avoid breaking API changes in future majors
 
 # ── MLflow UI tunnel ─────────────────────────────────────────────────────────
 pyngrok==8.1.2
 
 # ── Utilities ────────────────────────────────────────────────────────────────
-pillow==11.1.0
-torchinfo
-tqdm==4.67.1
-protobuf>=3.20.3          # ray requires >=3.20.3
-
-# ── Notebooks (optional, not needed in Docker) ───────────────────────────────
-# ipykernel==6.29.5
-# ipython==9.0.2
-# jupyterlab==4.3.6
-# notebook==7.3.3
+torchinfo>=0.2.0
+tqdm>=4.67.1
+protobuf>=3.20.3             # ray requires >=3.20.3; mlflow requires <8,>=3.12.0
