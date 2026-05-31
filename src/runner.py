@@ -24,37 +24,38 @@ from pathlib import Path
 from typing import Any
 
 import matplotlib
+
 matplotlib.use("Agg")  # headless rendering
 import matplotlib.pyplot as plt
+import mlflow
+import mlflow.pytorch
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
 import ray
+import ray.air as _ray_air
 import seaborn as sns
 import torch
-import ray.air as _ray_air
+from mlflow.tracking import MlflowClient
+from pytorch_lightning.callbacks import EarlyStopping
+from pytorch_lightning.loggers import TensorBoardLogger
 from ray import tune
 from ray.air.integrations.mlflow import MLflowLoggerCallback
 from ray.tune import CLIReporter
 from ray.tune.schedulers import ASHAScheduler
 from ray.tune.search.optuna import OptunaSearch
-from pytorch_lightning.callbacks import EarlyStopping
-from pytorch_lightning.loggers import TensorBoardLogger
 from torch import nn
 from torch.utils.data import DataLoader
-import mlflow
-import mlflow.pytorch
-from mlflow.tracking import MlflowClient
 
 from . import config as cfg
 from .callbacks import ScheduleFreeOptimizerCallback, SystemMonitorCallback
 from .datasets import (
+    IMAGE_CLS_DATASETS,
     REGRESSION_DATASETS,
     TABULAR_CLS_DATASETS,
-    IMAGE_CLS_DATASETS,
-    load_tabular_regression,
-    load_openml_tabular,
     load_image_dataset,
+    load_openml_tabular,
+    load_tabular_regression,
 )
 from .lightning_wrapper import LightningWrapper, RegressionLightningWrapper
 from .model_builder import build_tabular_model, list_tabular_models
@@ -70,10 +71,12 @@ def _make_reporter(frequency: int = 30) -> Any:
     """Return JupyterNotebookReporter in notebooks, CLIReporter otherwise."""
     try:
         from ray.tune.progress_reporter import JupyterNotebookReporter
+
         return JupyterNotebookReporter(overwrite=True, max_report_frequency=frequency)
     except Exception:
         pass
     return CLIReporter(max_report_frequency=frequency)
+
 
 # ---------------------------------------------------------------------------
 # Configuration dataclass
@@ -110,7 +113,7 @@ _ES_PATIENCE: dict[str, int] = {
 
 @dataclass
 class ExperimentConfig:
-    task_type: str                                    # regression | tabular_classification | image_classification
+    task_type: str  # regression | tabular_classification | image_classification
     datasets: list[str] = field(default_factory=list)
     model_types: list[str] = field(default_factory=list)
     num_samples: int = 96
@@ -143,10 +146,15 @@ class ExperimentConfig:
 # Output path helpers
 # ---------------------------------------------------------------------------
 
+
 def _makedirs(output_dir: str) -> None:
     for subdir in (
-        "best_run_plots", "tuned_run_plots", "default_run_plots",
-        "varying_rs_run_plots", "results", "results/telemetry",
+        "best_run_plots",
+        "tuned_run_plots",
+        "default_run_plots",
+        "varying_rs_run_plots",
+        "results",
+        "results/telemetry",
     ):
         Path(output_dir, subdir).mkdir(parents=True, exist_ok=True)
 
@@ -167,6 +175,7 @@ def _telemetry_path(output_dir: str, exp_key: str) -> str:
 # Dataset loading per task type
 # ---------------------------------------------------------------------------
 
+
 def _load_datasets(
     task_type: str,
     dataset_name: str,
@@ -178,40 +187,50 @@ def _load_datasets(
 
     if task_type == "regression":
         train_ds, val_ds, test_ds, n_feat, _, _ = load_tabular_regression(
-            dataset_name, seed=seed, data_dir=cfg_obj.data_dir,
+            dataset_name,
+            seed=seed,
+            data_dir=cfg_obj.data_dir,
             max_rows=max_rows,
         )
         return train_ds, val_ds, test_ds, n_feat, 0
 
     if task_type == "tabular_classification":
         train_ds, val_ds, test_ds, n_feat, n_cls = load_openml_tabular(
-            dataset_name, seed=seed, data_dir=cfg_obj.data_dir,
+            dataset_name,
+            seed=seed,
+            data_dir=cfg_obj.data_dir,
         )
         if max_rows:
-            from torch.utils.data import Subset as _Subset
             import torch as _torch
+            from torch.utils.data import Subset as _Subset
+
             def _sub(ds, n):
                 idx = _torch.randperm(len(ds))[:n].tolist()
                 return _Subset(ds, idx)
+
             train_ds = _sub(train_ds, int(max_rows * 0.70))
-            val_ds   = _sub(val_ds,   int(max_rows * 0.15))
-            test_ds  = _sub(test_ds,  int(max_rows * 0.15))
+            val_ds = _sub(val_ds, int(max_rows * 0.15))
+            test_ds = _sub(test_ds, int(max_rows * 0.15))
         return train_ds, val_ds, test_ds, n_feat, n_cls
 
     if task_type == "image_classification":
         train_ds, val_ds, test_ds, n_cls = load_image_dataset(
-            dataset_name, seed=seed, data_dir=cfg_obj.data_dir,
+            dataset_name,
+            seed=seed,
+            data_dir=cfg_obj.data_dir,
             kaggle_json=cfg_obj.kaggle_json,
         )
         if max_rows:
-            from torch.utils.data import Subset as _Subset
             import torch as _torch
+            from torch.utils.data import Subset as _Subset
+
             def _sub(ds, n):
                 idx = _torch.randperm(len(ds))[:n].tolist()
                 return _Subset(ds, idx)
+
             train_ds = _sub(train_ds, int(cfg_obj.mock_max_imgs * 0.70))
-            val_ds   = _sub(val_ds,   int(cfg_obj.mock_max_imgs * 0.15))
-            test_ds  = _sub(test_ds,  int(cfg_obj.mock_max_imgs * 0.15))
+            val_ds = _sub(val_ds, int(cfg_obj.mock_max_imgs * 0.15))
+            test_ds = _sub(test_ds, int(cfg_obj.mock_max_imgs * 0.15))
         return train_ds, val_ds, test_ds, -1, n_cls
 
     raise ValueError(f"unknown task_type: {task_type!r}")
@@ -221,15 +240,16 @@ def _load_datasets(
 # Model / wrapper builders
 # ---------------------------------------------------------------------------
 
-def _build_model(
-    task_type: str, model_type: str, n_features: int, n_classes: int
-) -> nn.Module:
+
+def _build_model(task_type: str, model_type: str, n_features: int, n_classes: int) -> nn.Module:
     hidden = max(64, n_features) if n_features > 0 else 64
     if task_type == "image_classification":
         return build_vision_model(model_type, num_classes=n_classes)
     if task_type == "regression":
         return build_tabular_model(model_type, input_shape=n_features, output_shape=1, hidden_units=hidden)
-    return build_tabular_model(model_type, input_shape=n_features, output_shape=n_classes, hidden_units=hidden)
+    return build_tabular_model(
+        model_type, input_shape=n_features, output_shape=n_classes, hidden_units=hidden
+    )
 
 
 def _make_wrapper(
@@ -242,22 +262,31 @@ def _make_wrapper(
     """Return (Lightning wrapper, tune_metrics dict)."""
     if task_type == "regression":
         wrapper = RegressionLightningWrapper(
-            model=model, optimizer_class=optimizer_class,
-            optimizer_hparams=hparams, loss_fn=nn.MSELoss(),
+            model=model,
+            optimizer_class=optimizer_class,
+            optimizer_hparams=hparams,
+            loss_fn=nn.MSELoss(),
         )
         tune_metrics = {
-            "val_loss": "val_loss", "val_mse": "val_mse",
-            "val_mae": "val_mae", "val_r2": "val_r2", "val_rmse": "val_rmse",
+            "val_loss": "val_loss",
+            "val_mse": "val_mse",
+            "val_mae": "val_mae",
+            "val_r2": "val_r2",
+            "val_rmse": "val_rmse",
         }
     else:
         wrapper = LightningWrapper(
-            model=model, optimizer_class=optimizer_class,
-            optimizer_hparams=hparams, loss_fn=nn.CrossEntropyLoss(),
+            model=model,
+            optimizer_class=optimizer_class,
+            optimizer_hparams=hparams,
+            loss_fn=nn.CrossEntropyLoss(),
             num_classes=n_classes,
         )
         tune_metrics = {
-            "val_loss": "val_loss", "val_accuracy": "val_accuracy",
-            "val_f1score": "val_f1score", "val_precision": "val_precision",
+            "val_loss": "val_loss",
+            "val_accuracy": "val_accuracy",
+            "val_f1score": "val_f1score",
+            "val_precision": "val_precision",
             "val_recall": "val_recall",
         }
     return wrapper, tune_metrics
@@ -271,10 +300,20 @@ def _hpo_metric(task_type: str) -> tuple[str, str]:
 
 def _bad_result(task_type: str) -> dict:
     if task_type == "regression":
-        return {"val_loss": float("inf"), "val_mse": float("inf"),
-                "val_mae": float("inf"), "val_r2": -float("inf"), "val_rmse": float("inf")}
-    return {"val_loss": float("inf"), "val_accuracy": 0.0,
-            "val_f1score": 0.0, "val_precision": 0.0, "val_recall": 0.0}
+        return {
+            "val_loss": float("inf"),
+            "val_mse": float("inf"),
+            "val_mae": float("inf"),
+            "val_r2": -float("inf"),
+            "val_rmse": float("inf"),
+        }
+    return {
+        "val_loss": float("inf"),
+        "val_accuracy": 0.0,
+        "val_f1score": 0.0,
+        "val_precision": 0.0,
+        "val_recall": 0.0,
+    }
 
 
 def _test_metric_keys(task_type: str) -> list[str]:
@@ -286,6 +325,7 @@ def _test_metric_keys(task_type: str) -> list[str]:
 # ---------------------------------------------------------------------------
 # HPO
 # ---------------------------------------------------------------------------
+
 
 def _run_hpo(
     task_type: str,
@@ -337,34 +377,41 @@ def _run_hpo(
 
     for optimizer_class, hparam_space in optimizer_params.items():
         opt_name = optimizer_class.__name__
-        log.info("HPO  optimizer=%s  samples=%d  startup=%d  max_concurrent=%d",
-                 opt_name, cfg_obj.num_samples, _n_startup, max_concurrent)
+        log.info(
+            "HPO  optimizer=%s  samples=%d  startup=%d  max_concurrent=%d",
+            opt_name,
+            cfg_obj.num_samples,
+            _n_startup,
+            max_concurrent,
+        )
 
         _opt_cls = optimizer_class
 
         def wrap(config: dict) -> None:
-            import sys, os as _os, warnings as _w, logging as _l
+            import logging as _l
+            import os as _os
+            import sys
+            import warnings as _w
+
             import torch as _torch
+
             sys.stderr = open(_os.devnull, "w")
             _w.filterwarnings("ignore")
             _l.getLogger("pytorch_lightning").setLevel(_l.ERROR)
             sys.unraisablehook = lambda *_: None
 
             _n_torch_threads = max(1, int(_CPU_PER_TRIAL))
-            _n_workers = (
-                max(0, min(int(_CPU_PER_TRIAL) - 1, 4))
-                if _TASK == "image_classification" else 0
-            )
+            _n_workers = max(0, min(int(_CPU_PER_TRIAL) - 1, 4)) if _TASK == "image_classification" else 0
             _torch.set_num_threads(_n_torch_threads)
 
             import pytorch_lightning as _pl
+            import ray as _ray
             from ray.tune.integration.pytorch_lightning import TuneReportCallback
             from torch.utils.data import DataLoader as _DL
-            import ray as _ray
 
             _pl.seed_everything(config.get("seed", 0), workers=True)
             train_ds = _ray.get(train_ref)
-            val_ds   = _ray.get(val_ref)
+            val_ds = _ray.get(val_ref)
 
             hparams = {k: v for k, v in config.items() if k not in skip_keys}
             if hasattr(_opt_cls, "__name__") and "Lion" in _opt_cls.__name__:
@@ -375,34 +422,50 @@ def _run_hpo(
             model = _build_model(_TASK, _MODEL_TYPE, _NUM_FEATURES, _N_CLASSES)
             wrapper, tune_metrics = _make_wrapper(_TASK, model, _opt_cls, hparams, _N_CLASSES)
             tune_cb = TuneReportCallback(tune_metrics, on="validation_end")
-            from .callbacks import ScheduleFreeOptimizerCallback as _SFCB
             from pytorch_lightning.callbacks import EarlyStopping as _ES
+
+            from .callbacks import ScheduleFreeOptimizerCallback as _SFCB
+
             sfcb = _SFCB()
-            es = _ES(monitor="val_loss", patience=_es_patience, mode="min",
-                     min_delta=1e-4, check_on_train_epoch_end=False)
+            es = _ES(
+                monitor="val_loss",
+                patience=_es_patience,
+                mode="min",
+                min_delta=1e-4,
+                check_on_train_epoch_end=False,
+            )
 
             trainer = _pl.Trainer(
                 callbacks=[tune_cb, sfcb, es],
                 max_epochs=_EPOCHS,
-                accelerator="auto", devices=1,
+                accelerator="auto",
+                devices=1,
                 precision="16-mixed" if _TASK != "regression" else "32-true",
-                enable_progress_bar=False, enable_checkpointing=False,
+                enable_progress_bar=False,
+                enable_checkpointing=False,
                 enable_model_summary=False,
                 logger=False,
             )
             bad = _bad_result(_TASK)
             try:
-                dl_kw = dict(batch_size=_BATCH, num_workers=_n_workers,
-                             pin_memory=True, persistent_workers=_n_workers > 0)
-                trainer.fit(wrapper, _DL(train_ds, shuffle=True, **dl_kw),
-                            _DL(val_ds, shuffle=False, **dl_kw))
+                dl_kw = dict(
+                    batch_size=_BATCH,
+                    num_workers=_n_workers,
+                    pin_memory=True,
+                    persistent_workers=_n_workers > 0,
+                )
+                trainer.fit(
+                    wrapper, _DL(train_ds, shuffle=True, **dl_kw), _DL(val_ds, shuffle=False, **dl_kw)
+                )
             except (AssertionError, RuntimeError) as e:
                 if any(k in str(e).lower() for k in ("grad", "c_tmp", "nan")):
-                    tune.report(bad); return
+                    tune.report(bad)
+                    return
                 raise
             except Exception as e:
                 if "nan" in str(e).lower():
-                    tune.report(bad); return
+                    tune.report(bad)
+                    return
                 raise
 
         sampler = _optuna.samplers.TPESampler(
@@ -420,9 +483,7 @@ def _run_hpo(
             save_artifact=False,
         )
 
-        trainable = tune.with_resources(
-            wrap, resources={"cpu": cpu_per_trial, "gpu": gpu_per_trial}
-        )
+        trainable = tune.with_resources(wrap, resources={"cpu": cpu_per_trial, "gpu": gpu_per_trial})
         tuner = tune.Tuner(
             trainable,
             param_space=hparam_space | {"seed": tune.choice(cfg_obj.seeds)},
@@ -432,8 +493,9 @@ def _run_hpo(
                 search_alg=searcher,
                 scheduler=ASHAScheduler(
                     max_t=cfg_obj.num_epochs,
-                    grace_period=max(1, cfg_obj.num_epochs // 4),
-                    reduction_factor=2, brackets=1,
+                    grace_period=max(1, cfg_obj.num_epochs // 10),
+                    reduction_factor=2,
+                    brackets=1,
                 ),
                 num_samples=cfg_obj.num_samples,
                 max_concurrent_trials=max_concurrent,
@@ -460,6 +522,7 @@ def _run_hpo(
 # ---------------------------------------------------------------------------
 # Evaluation (tuned / default / varying-seeds)
 # ---------------------------------------------------------------------------
+
 
 def _run_evaluation(
     task_type: str,
@@ -488,9 +551,9 @@ def _run_evaluation(
         pin_memory=True,
         persistent_workers=cfg_obj.num_workers > 0,
     )
-    train_dl = DataLoader(train_ds, shuffle=True,  **dl_kw)
-    val_dl   = DataLoader(val_ds,   shuffle=False, **dl_kw)
-    test_dl  = DataLoader(test_ds,  shuffle=False, **dl_kw)
+    train_dl = DataLoader(train_ds, shuffle=True, **dl_kw)
+    val_dl = DataLoader(val_ds, shuffle=False, **dl_kw)
+    test_dl = DataLoader(test_ds, shuffle=False, **dl_kw)
 
     seed_results: dict[str, list[dict]] = {}
 
@@ -514,7 +577,8 @@ def _run_evaluation(
                 es = EarlyStopping(
                     monitor="val_loss",
                     patience=_ES_PATIENCE.get(task_type, 15),
-                    mode="min", min_delta=1e-4,
+                    mode="min",
+                    min_delta=1e-4,
                     check_on_train_epoch_end=False,
                 )
                 tb_logger = TensorBoardLogger(
@@ -555,9 +619,12 @@ def _run_evaluation(
                 mlflow.log_metrics({k: v for k, v in ms.items() if isinstance(v, (int, float))})
                 telemetry_logger.log_summary(exp_key, opt_name, seed, mon)
 
-            log.info("  %s seed=%d  %s", opt_name, seed,
-                     "  ".join(f"{k}={v:.4f}" for k, v in ms.items()
-                                if k in test_keys and isinstance(v, float)))
+            log.info(
+                "  %s seed=%d  %s",
+                opt_name,
+                seed,
+                "  ".join(f"{k}={v:.4f}" for k, v in ms.items() if k in test_keys and isinstance(v, float)),
+            )
             seed_results[opt_name].append(ms)
 
     return seed_results
@@ -567,30 +634,35 @@ def _run_evaluation(
 # Summary DataFrames
 # ---------------------------------------------------------------------------
 
+
 def _build_tuned_summary(seed_results: dict[str, list[dict]], task_type: str) -> pd.DataFrame:
     rows = []
     for opt_name, runs in seed_results.items():
         if task_type == "regression":
-            r2s   = [r["test_r2"]   for r in runs if not np.isnan(r.get("test_r2",   float("nan")))]
+            r2s = [r["test_r2"] for r in runs if not np.isnan(r.get("test_r2", float("nan")))]
             rmses = [r["test_rmse"] for r in runs if not np.isnan(r.get("test_rmse", float("nan")))]
-            rows.append({
-                "optimizer": opt_name,
-                "r2_median":   statistics.median(r2s)   if r2s   else float("nan"),
-                "r2_max":      max(r2s)                 if r2s   else float("nan"),
-                "rmse_median": statistics.median(rmses) if rmses else float("nan"),
-                "rmse_min":    min(rmses)               if rmses else float("nan"),
-                "n_seeds": len(runs),
-            })
+            rows.append(
+                {
+                    "optimizer": opt_name,
+                    "r2_median": statistics.median(r2s) if r2s else float("nan"),
+                    "r2_max": max(r2s) if r2s else float("nan"),
+                    "rmse_median": statistics.median(rmses) if rmses else float("nan"),
+                    "rmse_min": min(rmses) if rmses else float("nan"),
+                    "n_seeds": len(runs),
+                }
+            )
         else:
             accs = [r["test_accuracy"] for r in runs if not np.isnan(r.get("test_accuracy", float("nan")))]
-            rows.append({
-                "optimizer": opt_name,
-                "acc_min":    min(accs)                 if accs else float("nan"),
-                "acc_median": statistics.median(accs)   if accs else float("nan"),
-                "acc_max":    max(accs)                 if accs else float("nan"),
-                "acc_std":    statistics.stdev(accs)    if len(accs) > 1 else 0.0,
-                "n_seeds": len(runs),
-            })
+            rows.append(
+                {
+                    "optimizer": opt_name,
+                    "acc_min": min(accs) if accs else float("nan"),
+                    "acc_median": statistics.median(accs) if accs else float("nan"),
+                    "acc_max": max(accs) if accs else float("nan"),
+                    "acc_std": statistics.stdev(accs) if len(accs) > 1 else 0.0,
+                    "n_seeds": len(runs),
+                }
+            )
     return pd.DataFrame(rows).set_index("optimizer")
 
 
@@ -614,11 +686,11 @@ def _build_comparison_df(
         }
         if task_type == "regression":
             row["RMSE"] = res.get("val_rmse", float("nan"))
-            row["MAE"]  = res.get("val_mae", float("nan"))
+            row["MAE"] = res.get("val_mae", float("nan"))
         else:
-            row["F1Score"]   = res.get("val_f1score", float("nan"))
+            row["F1Score"] = res.get("val_f1score", float("nan"))
             row["Precision"] = res.get("val_precision", float("nan"))
-            row["Recall"]    = res.get("val_recall", float("nan"))
+            row["Recall"] = res.get("val_recall", float("nan"))
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -626,6 +698,7 @@ def _build_comparison_df(
 # ---------------------------------------------------------------------------
 # Plotting helpers
 # ---------------------------------------------------------------------------
+
 
 def _save_metric_curves(
     analysis_results: dict,
@@ -645,13 +718,14 @@ def _save_metric_curves(
             # Try per-epoch curve from metrics_dataframe
             mdf = best.metrics_dataframe
             if mdf is not None and metric_name in mdf.columns:
-                ax.plot(mdf[metric_name].values,
-                        label=f"{opt_cls.__name__} (final={mdf[metric_name].iloc[-1]:.4f})")
+                ax.plot(
+                    mdf[metric_name].values,
+                    label=f"{opt_cls.__name__} (final={mdf[metric_name].iloc[-1]:.4f})",
+                )
             else:
                 # Fallback: single final-value horizontal line
                 val = (best.metrics or {}).get(metric_name, float("nan"))
-                ax.axhline(val, linestyle="--",
-                           label=f"{opt_cls.__name__} (final={val:.4f})", alpha=0.8)
+                ax.axhline(val, linestyle="--", label=f"{opt_cls.__name__} (final={val:.4f})", alpha=0.8)
             plotted = True
         except Exception as e:
             log.debug("Could not plot %s for %s: %s", metric_name, opt_cls.__name__, e)
@@ -677,8 +751,8 @@ def _save_resource_bars(
         {
             "optimizer": k,
             "avg_cpu_pct": v.get("avg_cpu_pct", 0),
-            "avg_ram_gb":  v.get("avg_ram_gb", 0),
-            "avg_gpu_gb":  v.get("avg_gpu_gb", 0),
+            "avg_ram_gb": v.get("avg_ram_gb", 0),
+            "avg_gpu_gb": v.get("avg_gpu_gb", 0),
         }
         for k, v in results.items()
     ]
@@ -707,11 +781,7 @@ def _save_boxplots(
     output_dir: str,
     exp_key: str,
 ) -> None:
-    rows = [
-        {**r, "optimizer": opt_name}
-        for opt_name, runs in seed_results.items()
-        for r in runs
-    ]
+    rows = [{**r, "optimizer": opt_name} for opt_name, runs in seed_results.items() for r in runs]
     if not rows:
         return
     df = pd.DataFrame(rows)
@@ -738,6 +808,7 @@ def _save_boxplots(
 # Persistence helpers
 # ---------------------------------------------------------------------------
 
+
 def _save_df(df: pd.DataFrame, path: str) -> None:
     df.to_csv(path)
     log.info("Saved: %s", path)
@@ -753,6 +824,7 @@ def _save_json(obj: Any, path: str) -> None:
 # Per-experiment orchestrator
 # ---------------------------------------------------------------------------
 
+
 def _run_experiment_pair(
     task_type: str,
     dataset_name: str,
@@ -764,30 +836,42 @@ def _run_experiment_pair(
     max_concurrent: int,
 ) -> dict:
     exp_key = f"{dataset_name}_{model_type}"
-    log.info("\n%s\n  EXPERIMENT: dataset=%s  model=%s\n%s",
-             "#" * 70, dataset_name, model_type, "#" * 70)
+    log.info("\n%s\n  EXPERIMENT: dataset=%s  model=%s\n%s", "#" * 70, dataset_name, model_type, "#" * 70)
 
     # 0. Prepare output
     telemetry_logger = TelemetryLogger(_telemetry_path(cfg_obj.output_dir, exp_key))
 
     # 1. Load dataset
     log.info("Loading %s ...", dataset_name)
-    train_ds, val_ds, test_ds, n_features, n_classes = _load_datasets(
-        task_type, dataset_name, cfg_obj
-    )
-    log.info("  n_features=%d  n_classes=%d  train=%d  val=%d  test=%d",
-             n_features, n_classes, len(train_ds), len(val_ds), len(test_ds))  # type: ignore[arg-type]
+    train_ds, val_ds, test_ds, n_features, n_classes = _load_datasets(task_type, dataset_name, cfg_obj)
+    log.info(
+        "  n_features=%d  n_classes=%d  train=%d  val=%d  test=%d",
+        n_features,
+        n_classes,
+        len(train_ds),
+        len(val_ds),
+        len(test_ds),
+    )  # type: ignore[arg-type]
 
     # 2. HPO
     exp_name = f"{task_type[:3]}_{dataset_name}_{model_type}"
     train_ref = ray.put(train_ds)
-    val_ref   = ray.put(val_ds)
+    val_ref = ray.put(val_ds)
 
     analysis_results = _run_hpo(
-        task_type, dataset_name, model_type, cfg_obj,
-        train_ref, val_ref, n_features, n_classes,
-        optimizer_params, exp_name,
-        gpu_per_trial, cpu_per_trial, max_concurrent,
+        task_type,
+        dataset_name,
+        model_type,
+        cfg_obj,
+        train_ref,
+        val_ref,
+        n_features,
+        n_classes,
+        optimizer_params,
+        exp_name,
+        gpu_per_trial,
+        cpu_per_trial,
+        max_concurrent,
     )
 
     # 3. Comparison DataFrame
@@ -796,9 +880,10 @@ def _run_experiment_pair(
 
     # 3b. Best-trial metric curves (using best trial's final values as reference)
     metric, mode = _hpo_metric(task_type)
-    for m in (["val_r2", "val_rmse"] if task_type == "regression" else ["val_accuracy", "val_f1score"]):
+    for m in ["val_r2", "val_rmse"] if task_type == "regression" else ["val_accuracy", "val_f1score"]:
         _save_metric_curves(
-            analysis_results, m,
+            analysis_results,
+            m,
             f"HPO best-trial {m}  [{exp_key}]",
             _plot_path(cfg_obj.output_dir, "best_run_plots", exp_key, m),
         )
@@ -819,18 +904,32 @@ def _run_experiment_pair(
     log.info("--- Tuned multi-seed evaluation ---")
     tuned_exp = f"tuned_{exp_name}"
     tuned_seed_results = _run_evaluation(
-        task_type, dataset_name, model_type, cfg_obj,
-        train_ds, val_ds, test_ds, n_features, n_classes,
-        tuned_pairs, tuned_exp, telemetry_logger, exp_key,
+        task_type,
+        dataset_name,
+        model_type,
+        cfg_obj,
+        train_ds,
+        val_ds,
+        test_ds,
+        n_features,
+        n_classes,
+        tuned_pairs,
+        tuned_exp,
+        telemetry_logger,
+        exp_key,
     )
     tuned_summary = _build_tuned_summary(tuned_seed_results, task_type)
     _save_df(tuned_summary, _result_path(cfg_obj.output_dir, exp_key, "tuned_summary.csv"))
 
     tuned_best = {
         opt_name: max(
-            [r for r in runs if not np.isnan(r.get(
-                "test_r2" if task_type == "regression" else "test_accuracy", float("nan")
-            ))],
+            [
+                r
+                for r in runs
+                if not np.isnan(
+                    r.get("test_r2" if task_type == "regression" else "test_accuracy", float("nan"))
+                )
+            ],
             key=lambda r: r.get("test_r2" if task_type == "regression" else "test_accuracy", float("-inf")),
             default=runs[0] if runs else {},
         )
@@ -843,24 +942,40 @@ def _run_experiment_pair(
     default_pairs = [(opt_cls, {}) for opt_cls, _ in tuned_pairs]
     default_exp = f"default_{exp_name}"
     default_seed_results = _run_evaluation(
-        task_type, dataset_name, model_type, cfg_obj,
-        train_ds, val_ds, test_ds, n_features, n_classes,
-        default_pairs, default_exp, telemetry_logger, exp_key,
+        task_type,
+        dataset_name,
+        model_type,
+        cfg_obj,
+        train_ds,
+        val_ds,
+        test_ds,
+        n_features,
+        n_classes,
+        default_pairs,
+        default_exp,
+        telemetry_logger,
+        exp_key,
     )
     default_summary = _build_tuned_summary(default_seed_results, task_type)
     _save_df(default_summary, _result_path(cfg_obj.output_dir, exp_key, "default_summary.csv"))
 
     default_best = {
         opt_name: max(
-            [r for r in runs if not np.isnan(r.get(
-                "test_r2" if task_type == "regression" else "test_accuracy", float("nan")
-            ))],
+            [
+                r
+                for r in runs
+                if not np.isnan(
+                    r.get("test_r2" if task_type == "regression" else "test_accuracy", float("nan"))
+                )
+            ],
             key=lambda r: r.get("test_r2" if task_type == "regression" else "test_accuracy", float("-inf")),
             default=runs[0] if runs else {},
         )
         for opt_name, runs in default_seed_results.items()
     }
-    _save_resource_bars(default_best, f"Default [{exp_key}]", cfg_obj.output_dir, exp_key, "default_run_plots")
+    _save_resource_bars(
+        default_best, f"Default [{exp_key}]", cfg_obj.output_dir, exp_key, "default_run_plots"
+    )
 
     # 6. Varying-seeds boxplots (reuse tuned_seed_results)
     _save_boxplots(tuned_seed_results, task_type, cfg_obj.output_dir, exp_key)
@@ -877,11 +992,7 @@ def _run_experiment_pair(
     _save_json(run_history, _result_path(cfg_obj.output_dir, exp_key, "run_history.json"))
 
     # 8. RS results CSV
-    rs_rows = [
-        {**r, "optimizer": opt_name}
-        for opt_name, runs in tuned_seed_results.items()
-        for r in runs
-    ]
+    rs_rows = [{**r, "optimizer": opt_name} for opt_name, runs in tuned_seed_results.items() for r in runs]
     if rs_rows:
         _save_df(pd.DataFrame(rs_rows), _result_path(cfg_obj.output_dir, exp_key, "rs_results.csv"))
 
@@ -895,6 +1006,7 @@ def _run_experiment_pair(
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
+
 
 def run_experiments(cfg_obj: ExperimentConfig) -> dict:
     """Run the full 6-step experiment loop for all (dataset, model_type) pairs."""
@@ -922,8 +1034,9 @@ def run_experiments(cfg_obj: ExperimentConfig) -> dict:
     gpu_per_trial, cpu_per_trial, max_concurrent = cfg.detect_gpu_resources(cfg_obj.gpu_num, task_type)
     log.info("=" * 60)
     log.info("RESOURCE CONFIG  n_gpus=%d  task=%s", cfg_obj.gpu_num, task_type)
-    log.info("  gpu/trial=%.2f  cpu/trial=%.1f  max_concurrent=%d",
-             gpu_per_trial, cpu_per_trial, max_concurrent)
+    log.info(
+        "  gpu/trial=%.2f  cpu/trial=%.1f  max_concurrent=%d", gpu_per_trial, cpu_per_trial, max_concurrent
+    )
     log.info("=" * 60)
 
     all_results: dict[str, dict] = {}
@@ -933,8 +1046,14 @@ def run_experiments(cfg_obj: ExperimentConfig) -> dict:
             exp_key = f"{dataset_name}_{model_type}"
             try:
                 result = _run_experiment_pair(
-                    task_type, dataset_name, model_type, cfg_obj,
-                    optimizer_params, gpu_per_trial, cpu_per_trial, max_concurrent,
+                    task_type,
+                    dataset_name,
+                    model_type,
+                    cfg_obj,
+                    optimizer_params,
+                    gpu_per_trial,
+                    cpu_per_trial,
+                    max_concurrent,
                 )
                 all_results[exp_key] = result
             except Exception as e:
@@ -942,6 +1061,7 @@ def run_experiments(cfg_obj: ExperimentConfig) -> dict:
 
     # Cross-experiment summary
     from .stats import cross_experiment_summary
+
     if all_results:
         all_tuned = {k: v["tuned_seed_results"] for k, v in all_results.items()}
         cross_df = cross_experiment_summary(all_tuned, task_type)
@@ -949,6 +1069,5 @@ def run_experiments(cfg_obj: ExperimentConfig) -> dict:
             _save_df(cross_df, _result_path(cfg_obj.output_dir, "cross", "summary.csv"))
 
     ray.shutdown()
-    log.info("\n%s\nAll %d experiments done.\n%s",
-             "#" * 70, len(all_results), "#" * 70)
+    log.info("\n%s\nAll %d experiments done.\n%s", "#" * 70, len(all_results), "#" * 70)
     return all_results
