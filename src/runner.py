@@ -32,11 +32,11 @@ import pytorch_lightning as pl
 import ray
 import seaborn as sns
 import torch
+import ray.air as _ray_air
 from ray import tune
 from ray.air.integrations.mlflow import MLflowLoggerCallback
 from ray.tune import CLIReporter
 from ray.tune.schedulers import ASHAScheduler
-from ray.tune.search import ConcurrencyLimiter
 from ray.tune.search.optuna import OptunaSearch
 from pytorch_lightning.callbacks import EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
@@ -302,7 +302,18 @@ def _run_hpo(
     cpu_per_trial: float,
     max_concurrent: int,
 ) -> dict:
-    """Run HPO for all optimizers, return {optimizer_class: best_config}."""
+    """Run HPO for all optimizers via tune.Tuner (Ray 2.x API).
+
+    Returns {optimizer_class: ResultGrid}.
+
+    Key design decision: ConcurrencyLimiter is intentionally NOT used.
+    It tracks "outstanding suggestions" independently of Ray's execution
+    scheduler and can refuse to yield new configs even when trial slots
+    are free, leaving GPUs idle. max_concurrent_trials in TuneConfig is
+    the authoritative concurrency control.
+    """
+    import optuna as _optuna
+
     metric, mode = _hpo_metric(task_type)
     skip_keys = cfg.SKIP_KEYS
     _NUM_FEATURES = n_features
@@ -314,19 +325,17 @@ def _run_hpo(
     _CPU_PER_TRIAL = cpu_per_trial
     _es_patience = max(5, _ES_PATIENCE.get(task_type, 15))
 
-    analysis_results: dict = {}
-
-    # n_startup_trials must be >= max_concurrent so all initial trials use random
-    # sampling and start simultaneously (TPE needs prior results before it can suggest;
-    # if n_startup_trials < max_concurrent some slots stay empty waiting for feedback).
+    # n_startup_trials >= max_concurrent: first full batch uses pure random
+    # sampling so all concurrent slots fill immediately on start.
     _n_startup = max(max_concurrent, cfg_obj.num_samples // 3)
+
+    result_grids: dict = {}
 
     for optimizer_class, hparam_space in optimizer_params.items():
         opt_name = optimizer_class.__name__
-        log.info("HPO  optimizer=%s  samples=%d  startup_trials=%d",
-                 opt_name, cfg_obj.num_samples, _n_startup)
+        log.info("HPO  optimizer=%s  samples=%d  startup=%d  max_concurrent=%d",
+                 opt_name, cfg_obj.num_samples, _n_startup, max_concurrent)
 
-        # Import these inside closure to ensure they're available in Ray workers
         _opt_cls = optimizer_class
 
         def wrap(config: dict) -> None:
@@ -337,8 +346,6 @@ def _run_hpo(
             _l.getLogger("pytorch_lightning").setLevel(_l.ERROR)
             sys.unraisablehook = lambda *_: None
 
-            # Tabular/regression data is tiny and in-memory — workers add overhead.
-            # Image tasks benefit from prefetch workers.
             _n_torch_threads = max(1, int(_CPU_PER_TRIAL))
             _n_workers = (
                 max(0, min(int(_CPU_PER_TRIAL) - 1, 4))
@@ -348,7 +355,6 @@ def _run_hpo(
 
             import pytorch_lightning as _pl
             from ray.tune.integration.pytorch_lightning import TuneReportCallback
-            from torch import nn as _nn
             from torch.utils.data import DataLoader as _DL
             import ray as _ray
 
@@ -395,52 +401,55 @@ def _run_hpo(
                     tune.report(bad); return
                 raise
 
-        import optuna as _optuna
-        _sampler = _optuna.samplers.TPESampler(
+        sampler = _optuna.samplers.TPESampler(
             n_startup_trials=_n_startup,
             seed=42,
-            multivariate=True,   # account for correlations between params
-            group=True,          # group-aware sampling for mixed param types
+            multivariate=True,
+            group=True,
         )
-        searcher = ConcurrencyLimiter(
-            OptunaSearch(sampler=_sampler, metric=metric, mode=mode),
-            max_concurrent=max_concurrent,
-        )
-        tracking_uri = cfg_obj.mlflow_uri
+        searcher = OptunaSearch(sampler=sampler, metric=metric, mode=mode)
+
         mlflow_cb = MLflowLoggerCallback(
-            tracking_uri=tracking_uri,
+            tracking_uri=cfg_obj.mlflow_uri,
             experiment_name=f"{exp_name}_{opt_name}_tune",
             save_artifact=False,
         )
-        analysis = tune.run(
-            wrap,
-            config=hparam_space | {"seed": tune.choice(cfg_obj.seeds)},
-            num_samples=cfg_obj.num_samples,
-            search_alg=searcher,
-            scheduler=ASHAScheduler(
-                metric=metric, mode=mode,
-                max_t=cfg_obj.num_epochs,
-                grace_period=max(1, cfg_obj.num_epochs // 8),
-                reduction_factor=2, brackets=1,
-            ),
-            resources_per_trial={"cpu": cpu_per_trial, "gpu": gpu_per_trial},
-            max_concurrent_trials=max_concurrent,
-            storage_path=str(Path(cfg_obj.output_dir) / "ray_results"),
-            log_to_file=True,
-            callbacks=[mlflow_cb],
-            progress_reporter=_make_reporter(frequency=30),
-            raise_on_failed_trial=False,
-            fail_fast=False,
-            max_failures=0,
-            verbose=1,
+
+        trainable = tune.with_resources(
+            wrap, resources={"cpu": cpu_per_trial, "gpu": gpu_per_trial}
         )
-        analysis_results[optimizer_class] = analysis
-        best = analysis.get_best_trial(metric, mode, "last")
+        tuner = tune.Tuner(
+            trainable,
+            param_space=hparam_space | {"seed": tune.choice(cfg_obj.seeds)},
+            tune_config=tune.TuneConfig(
+                metric=metric,
+                mode=mode,
+                search_alg=searcher,
+                scheduler=ASHAScheduler(
+                    max_t=cfg_obj.num_epochs,
+                    grace_period=max(1, cfg_obj.num_epochs // 8),
+                    reduction_factor=2, brackets=1,
+                ),
+                num_samples=cfg_obj.num_samples,
+                max_concurrent_trials=max_concurrent,
+            ),
+            run_config=_ray_air.RunConfig(
+                storage_path=str(Path(cfg_obj.output_dir) / "ray_results"),
+                log_to_file=True,
+                callbacks=[mlflow_cb],
+                progress_reporter=_make_reporter(frequency=30),
+                verbose=1,
+            ),
+        )
+        result_grid = tuner.fit()
+        result_grids[optimizer_class] = result_grid
+
+        best = result_grid.get_best_result(metric=metric, mode=mode)
         if best:
-            val = best.last_result.get(metric, float("nan"))
+            val = (best.metrics or {}).get(metric, float("nan"))
             log.info("  best %s = %.4f", metric, val)
 
-    return analysis_results
+    return result_grids
 
 
 # ---------------------------------------------------------------------------
@@ -586,12 +595,12 @@ def _build_comparison_df(
 ) -> pd.DataFrame:
     metric, mode = _hpo_metric(task_type)
     rows = []
-    for opt_cls, analysis in analysis_results.items():
-        best_trial = analysis.get_best_trial(metric, mode, "last")
-        if best_trial is None:
+    for opt_cls, result_grid in analysis_results.items():
+        best = result_grid.get_best_result(metric=metric, mode=mode)
+        if best is None:
             continue
-        best_cfg = analysis.get_best_config(metric=metric, mode=mode) or {}
-        res = best_trial.last_result
+        best_cfg = best.config or {}
+        res = best.metrics or {}
         row: dict = {
             "Optimizer": opt_cls.__name__,
             "Config": best_cfg,
@@ -620,33 +629,29 @@ def _save_metric_curves(
     out_path: str,
 ) -> None:
     """Plot per-epoch validation metric for the best trial of each optimizer."""
+    mode = "max" if ("r2" in metric_name or "accuracy" in metric_name) else "min"
     fig, ax = plt.subplots(figsize=(10, 5))
-    metric, mode = (metric_name, "max") if "r2" in metric_name or "accuracy" in metric_name else (metric_name, "min")
     plotted = False
-    for opt_cls, analysis in analysis_results.items():
+    for opt_cls, result_grid in analysis_results.items():
         try:
-            best = analysis.get_best_trial(metric_name, mode, "last")
+            best = result_grid.get_best_result(metric=metric_name, mode=mode)
             if best is None:
                 continue
-            df = best.metric_analysis
-            if df is None or metric_name not in str(df):
-                continue
-            # Use the metrics_dataframe from the best result
-            mdf = best.last_result
-            # Fallback: use metric_analysis per-epoch data
-            results_df = analysis.dataframe(metric=metric_name, mode=mode)
-            # Try to extract epoch-level data from the result object
-            try:
-                epoch_data = best.metric_analysis.get(metric_name, {}).get("last", None)
-            except Exception:
-                epoch_data = None
-            ax.axhline(mdf.get(metric_name, float("nan")), linestyle="--",
-                       label=f"{opt_cls.__name__} (final={mdf.get(metric_name, float('nan')):.4f})", alpha=0.8)
+            # Try per-epoch curve from metrics_dataframe
+            mdf = best.metrics_dataframe
+            if mdf is not None and metric_name in mdf.columns:
+                ax.plot(mdf[metric_name].values,
+                        label=f"{opt_cls.__name__} (final={mdf[metric_name].iloc[-1]:.4f})")
+            else:
+                # Fallback: single final-value horizontal line
+                val = (best.metrics or {}).get(metric_name, float("nan"))
+                ax.axhline(val, linestyle="--",
+                           label=f"{opt_cls.__name__} (final={val:.4f})", alpha=0.8)
             plotted = True
         except Exception as e:
             log.debug("Could not plot %s for %s: %s", metric_name, opt_cls.__name__, e)
     ax.set_title(title)
-    ax.set_xlabel("Trial (final value)")
+    ax.set_xlabel("Epoch")
     ax.set_ylabel(metric_name)
     if plotted:
         ax.legend(fontsize=8)
@@ -793,10 +798,11 @@ def _run_experiment_pair(
             _plot_path(cfg_obj.output_dir, "best_run_plots", exp_key, m),
         )
 
-    # Build (optimizer_class, best_config) pairs
+    # Build (optimizer_class, best_config) pairs from ResultGrid objects
     tuned_pairs = []
-    for opt_cls, analysis in analysis_results.items():
-        best_cfg = analysis.get_best_config(metric=metric, mode=mode) or {}
+    for opt_cls, result_grid in analysis_results.items():
+        best = result_grid.get_best_result(metric=metric, mode=mode)
+        best_cfg = best.config if best else {}
         hparams = {k: v for k, v in best_cfg.items() if k not in cfg.SKIP_KEYS}
         if "Lion" in opt_cls.__name__:
             hparams["use_triton"] = False
