@@ -328,6 +328,10 @@ def _run_hpo(
     # n_startup_trials >= max_concurrent: first full batch uses pure random
     # sampling so all concurrent slots fill immediately on start.
     _n_startup = max(max_concurrent, cfg_obj.num_samples // 3)
+    # Ray defaults TUNE_MAX_PENDING_TRIALS_PG=1 for non-Basic searchers.
+    # OptunaSearch then creates only one pending placement group at a time,
+    # so slow Lightning trial startup leaves most fractional-GPU slots idle.
+    os.environ["TUNE_MAX_PENDING_TRIALS_PG"] = str(max_concurrent)
 
     result_grids: dict = {}
 
