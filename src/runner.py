@@ -411,6 +411,7 @@ def _run_hpo(
                 reduction_factor=2, brackets=1,
             ),
             resources_per_trial={"cpu": cpu_per_trial, "gpu": gpu_per_trial},
+            max_concurrent_trials=max_concurrent,
             storage_path=str(Path(cfg_obj.output_dir) / "ray_results"),
             log_to_file=True,
             callbacks=[mlflow_cb],
@@ -892,8 +893,11 @@ def run_experiments(cfg_obj: ExperimentConfig) -> dict:
 
     # GPU resource allocation
     gpu_per_trial, cpu_per_trial, max_concurrent = cfg.detect_gpu_resources(cfg_obj.gpu_num, task_type)
-    log.info("GPU resources: gpu/trial=%.2f  cpu/trial=%.1f  max_concurrent=%d",
+    log.info("=" * 60)
+    log.info("RESOURCE CONFIG  n_gpus=%d  task=%s", cfg_obj.gpu_num, task_type)
+    log.info("  gpu/trial=%.2f  cpu/trial=%.1f  max_concurrent=%d",
              gpu_per_trial, cpu_per_trial, max_concurrent)
+    log.info("=" * 60)
 
     all_results: dict[str, dict] = {}
 
