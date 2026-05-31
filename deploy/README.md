@@ -18,13 +18,16 @@ docker login
 ./deploy/build_and_push.sh v1.2         # pushes :v1.2
 ```
 
-The image is based on `pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime` and
+The image is based on `pytorch/pytorch:2.7.0-cuda12.6-cudnn9-runtime` and
 includes all Python dependencies plus the AdEMAMix and Stacey git repos.
 
 ### 2. Rent a GPU instance
 
 ```bash
-# 4× RTX 4090, 100 GB disk (cheapest matching offer)
+# 4× RTX 3090 (24 GB VRAM, Ampere sm_86) — recommended
+./deploy/create_instance.sh RTX_3090 4 100
+
+# 4× RTX 4090, 100 GB disk
 ./deploy/create_instance.sh RTX_4090 4 100
 
 # 4× A100 80 GB, 200 GB disk

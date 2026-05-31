@@ -1,5 +1,5 @@
-# Supports Ampere / Ada / Hopper / Blackwell (A100, H100, RTX 3090/4090/5060Ti+)
-# CUDA 12.6, cuDNN 9 — required for sm_120 (Blackwell)
+# Supports Ampere / Ada / Hopper (RTX 3090/4090, A100, H100) — sm_80..sm_90
+# CUDA 12.6, cuDNN 9
 FROM pytorch/pytorch:2.7.0-cuda12.6-cudnn9-runtime
 
 WORKDIR /workspace
