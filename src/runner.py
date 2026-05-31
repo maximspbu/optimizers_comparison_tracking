@@ -406,6 +406,7 @@ def _run_hpo(
             seed=42,
             multivariate=True,
             group=True,
+            constant_liar=True,  # pending trials treated as pessimistic lies → full parallel throughput
         )
         searcher = OptunaSearch(sampler=sampler, metric=metric, mode=mode)
 
@@ -434,7 +435,7 @@ def _run_hpo(
                 max_concurrent_trials=max_concurrent,
             ),
             run_config=_ray_air.RunConfig(
-                storage_path=str(Path(cfg_obj.output_dir) / "ray_results"),
+                storage_path=str(Path(cfg_obj.output_dir).resolve() / "ray_results"),
                 log_to_file=True,
                 callbacks=[mlflow_cb],
                 progress_reporter=_make_reporter(frequency=30),
