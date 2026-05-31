@@ -264,6 +264,7 @@ def setup(
     working_dir: str = ".",
     seed: int = SEED,
     n_gpus: int = 1,
+    n_cpus: int | None = None,
     silent: bool = True,
 ) -> None:
     """Initialise Ray, seed everything, set pandas/torch options."""
@@ -283,11 +284,13 @@ def setup(
 
     set_global_seed(seed)
     pd.set_option("display.max_colwidth", None)
+    ray_cpus = n_cpus if n_cpus is not None else (os.cpu_count() or 4)
     ray.shutdown()
     ray.init(
         runtime_env={"env_vars": _SILENT_ENV, "working_dir": working_dir},
         logging_level=logging.ERROR,
         log_to_driver=False,
+        num_cpus=ray_cpus,
         num_gpus=n_gpus if n_gpus > 0 else None,
     )
     pprint(ray.cluster_resources())
