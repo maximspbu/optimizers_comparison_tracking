@@ -43,7 +43,7 @@ def get_train_valid_test_datasets(
 
     scaler = StandardScaler()
     X_train_scaled_np = scaler.fit_transform(X_train_np)
-    X_valid_scaled_np = scaler.fit_transform(X_valid_np)
+    X_valid_scaled_np = scaler.transform(X_valid_np)
     X_test_scaled_np = scaler.transform(X_test_np)
 
     X_train_tensor = torch.tensor(X_train_scaled_np, dtype=torch.float32)
@@ -88,7 +88,7 @@ def get_classification_datasets(
 
     scaler = StandardScaler()
     X_train_scaled_np = scaler.fit_transform(X_train_np)
-    X_valid_scaled_np = scaler.fit_transform(X_valid_np)
+    X_valid_scaled_np = scaler.transform(X_valid_np)
     X_test_scaled_np = scaler.transform(X_test_np)
 
     X_train_tensor = torch.tensor(X_train_scaled_np, dtype=torch.float32)
