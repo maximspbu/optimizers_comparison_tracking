@@ -1,4 +1,4 @@
-# Core ML / DL
+# ── Core ML / DL ────────────────────────────────────────────────────────────
 torch==2.6.0
 torchvision==0.21.0
 torchmetrics==1.7.0
@@ -7,42 +7,47 @@ pandas==2.2.3
 scikit-learn==1.6.1
 scipy==1.15.2
 
-# PyTorch Lightning
-pytorch-lightning
+# ── PyTorch Lightning ────────────────────────────────────────────────────────
+pytorch-lightning==2.5.1
 lightning-utilities==0.14.2
 
-# Optimizers
+# ── Optimizers ───────────────────────────────────────────────────────────────
+lion-pytorch==0.2.4
+torch-optimizer==0.3.0
+schedulefree
+galore-torch
 adabelief-pytorch==0.2.0
 adabound==0.0.5
-galore-torch
-lion-pytorch==0.2.3
-optax
-schedulefree
-torch-optimizer==0.3.0
-# AdEMAMix and Stacey are not on PyPI — install via git clone (see classification notebook cell 2)
+# AdEMAMix and Stacey are not on PyPI — cloned via git in Dockerfile:
+#   git clone https://github.com/nanowell/AdEMAMix-Optimizer-Pytorch
+#   git clone https://github.com/xinyuluo8561/Stacey
 
-# Experiment tracking & HPO
-mlflow==3.4.0
-ray==2.45.0
+# ── Experiment tracking & HPO ────────────────────────────────────────────────
+mlflow==3.12.0
+ray[tune]==2.49.2
+optuna
+psutil
+pynvml                    # GPU utilisation % via NVML
 
-# Visualization
+# ── Dataset downloading ──────────────────────────────────────────────────────
+openml
+kaggle                    # kaggle CLI for dataset downloads
+
+# ── Visualisation ────────────────────────────────────────────────────────────
 matplotlib==3.10.1
 seaborn==0.13.2
 
-# Notebooks
-ipykernel==6.29.5
-ipython==9.0.2
-jupyterlab==4.3.6
-notebook==7.3.3
-torchinfo
+# ── MLflow UI tunnel ─────────────────────────────────────────────────────────
+pyngrok==8.1.2
 
-# ONNX export
-onnx==1.19.1
-onnxscript
-
-# Utilities
+# ── Utilities ────────────────────────────────────────────────────────────────
 pillow==11.1.0
-pyngrok
-tensorboard==2.19.0
-tensorboardX==2.6.2.2
+torchinfo
 tqdm==4.67.1
+protobuf==3.20.0          # required by some Ray/TF components
+
+# ── Notebooks (optional, not needed in Docker) ───────────────────────────────
+# ipykernel==6.29.5
+# ipython==9.0.2
+# jupyterlab==4.3.6
+# notebook==7.3.3
