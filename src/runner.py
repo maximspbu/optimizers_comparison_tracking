@@ -38,6 +38,7 @@ from ray.tune import CLIReporter
 from ray.tune.schedulers import ASHAScheduler
 from ray.tune.search import ConcurrencyLimiter
 from ray.tune.search.optuna import OptunaSearch
+from pytorch_lightning.callbacks import EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
 from torch import nn
 from torch.utils.data import DataLoader
@@ -83,20 +84,27 @@ TASK_DEFAULTS: dict[str, dict] = {
         "datasets": list(REGRESSION_DATASETS),
         "model_types": ["simple_mlp", "attention_mlp"],
         "batch_size": 256,
-        "num_epochs": 30,
+        "num_epochs": 100,
     },
     "tabular_classification": {
         "datasets": list(TABULAR_CLS_DATASETS),
         "model_types": ["simple_cls", "attention_cls"],
         "batch_size": 1024,
-        "num_epochs": 26,
+        "num_epochs": 100,
     },
     "image_classification": {
         "datasets": list(IMAGE_CLS_DATASETS),
         "model_types": ["resnet18", "efficientnet_v2_s"],
         "batch_size": 64,
-        "num_epochs": 10,
+        "num_epochs": 50,
     },
+}
+
+# Early stopping patience per task — how many val epochs without improvement before stop
+_ES_PATIENCE: dict[str, int] = {
+    "regression": 20,
+    "tabular_classification": 15,
+    "image_classification": 10,
 }
 
 
@@ -304,6 +312,7 @@ def _run_hpo(
     _BATCH = cfg_obj.batch_size
     _EPOCHS = cfg_obj.num_epochs
     _CPU_PER_TRIAL = cpu_per_trial
+    _ES_PATIENCE = max(5, _ES_PATIENCE.get(task_type, 15))
 
     analysis_results: dict = {}
 
@@ -347,10 +356,13 @@ def _run_hpo(
             wrapper, tune_metrics = _make_wrapper(_TASK, model, _opt_cls, hparams, _N_CLASSES)
             tune_cb = TuneReportCallback(tune_metrics, on="validation_end")
             from .callbacks import ScheduleFreeOptimizerCallback as _SFCB
+            from pytorch_lightning.callbacks import EarlyStopping as _ES
             sfcb = _SFCB()
+            es = _ES(monitor="val_loss", patience=_ES_PATIENCE, mode="min",
+                     min_delta=1e-4, check_on_train_epoch_end=False)
 
             trainer = _pl.Trainer(
-                callbacks=[tune_cb, sfcb],
+                callbacks=[tune_cb, sfcb, es],
                 max_epochs=_EPOCHS,
                 accelerator="auto", devices=1,
                 precision="16-mixed" if _TASK != "regression" else "32-true",
@@ -467,14 +479,19 @@ def _run_evaluation(
                 mlflow.pytorch.autolog(log_every_n_step=0)
                 sys_mon = SystemMonitorCallback()
                 sfcb = ScheduleFreeOptimizerCallback()
-
+                es = EarlyStopping(
+                    monitor="val_loss",
+                    patience=_ES_PATIENCE.get(task_type, 15),
+                    mode="min", min_delta=1e-4,
+                    check_on_train_epoch_end=False,
+                )
                 tb_logger = TensorBoardLogger(
                     save_dir=str(Path(cfg_obj.output_dir) / "tensorboard"),
                     name=exp_key,
                     version=f"{opt_name}_seed{seed}",
                 )
                 trainer = pl.Trainer(
-                    callbacks=[sfcb, sys_mon],
+                    callbacks=[sfcb, sys_mon, es],
                     logger=tb_logger,
                     max_epochs=cfg_obj.num_epochs,
                     accelerator="auto",
