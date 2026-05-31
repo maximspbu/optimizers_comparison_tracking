@@ -1,6 +1,6 @@
-# Supports Ampere / Ada / Hopper (A100, H100, RTX 3090/4090)
-# CUDA 12.4, cuDNN 9
-FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+# Supports Ampere / Ada / Hopper / Blackwell (A100, H100, RTX 3090/4090/5060Ti+)
+# CUDA 12.6, cuDNN 9 — required for sm_120 (Blackwell)
+FROM pytorch/pytorch:2.7.0-cuda12.6-cudnn9-runtime
 
 WORKDIR /workspace
 
@@ -12,8 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ── Python deps ──────────────────────────────────────────────────────────────
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir protobuf==3.20.0
+    && pip install --no-cache-dir -r requirements.txt
 
 # ── Clone optimizer repos that are not on PyPI ───────────────────────────────
 # Pin to known-good commits so the image is reproducible
