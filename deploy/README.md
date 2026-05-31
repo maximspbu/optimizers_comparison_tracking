@@ -24,7 +24,10 @@ includes all Python dependencies plus the AdEMAMix and Stacey git repos.
 ### 2. Rent a GPU instance
 
 ```bash
-# 4× RTX 3090 (24 GB VRAM, Ampere sm_86) — recommended
+# 4× RTX 4080 (16 GB VRAM, Ada sm_89) — recommended
+./deploy/create_instance.sh RTX_4080 4 100
+
+# 4× RTX 3090 (24 GB VRAM, Ampere sm_86)
 ./deploy/create_instance.sh RTX_3090 4 100
 
 # 4× RTX 4090, 100 GB disk

@@ -10,11 +10,11 @@
 #   ./deploy/create_instance.sh [gpu_type] [num_gpus] [disk_gb]
 #
 # Examples:
-#   ./deploy/create_instance.sh RTX_4090 4 100
+#   ./deploy/create_instance.sh RTX_4080 4 100
 #   ./deploy/create_instance.sh A100_SXM4_80GB 4 200
 set -euo pipefail
 
-GPU_TYPE="${1:-RTX_4090}"
+GPU_TYPE="${1:-RTX_4080}"
 NUM_GPUS="${2:-4}"
 DISK_GB="${3:-100}"
 DOCKERHUB_USER="${DOCKERHUB_USER:?Set DOCKERHUB_USER}"

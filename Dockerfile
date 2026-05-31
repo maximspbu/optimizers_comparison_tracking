@@ -1,4 +1,4 @@
-# Supports Ampere / Ada / Hopper (RTX 3090/4090, A100, H100) — sm_80..sm_90
+# Supports Ada / Ampere / Hopper (RTX 4080/4090/3090, A100, H100) — sm_80..sm_90
 # CUDA 12.6, cuDNN 9
 FROM pytorch/pytorch:2.7.0-cuda12.6-cudnn9-runtime
 
