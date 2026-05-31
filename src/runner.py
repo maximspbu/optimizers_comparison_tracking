@@ -312,7 +312,7 @@ def _run_hpo(
     _BATCH = cfg_obj.batch_size
     _EPOCHS = cfg_obj.num_epochs
     _CPU_PER_TRIAL = cpu_per_trial
-    _ES_PATIENCE = max(5, _ES_PATIENCE.get(task_type, 15))
+    _es_patience = max(5, _ES_PATIENCE.get(task_type, 15))
 
     analysis_results: dict = {}
 
@@ -358,7 +358,7 @@ def _run_hpo(
             from .callbacks import ScheduleFreeOptimizerCallback as _SFCB
             from pytorch_lightning.callbacks import EarlyStopping as _ES
             sfcb = _SFCB()
-            es = _ES(monitor="val_loss", patience=_ES_PATIENCE, mode="min",
+            es = _ES(monitor="val_loss", patience=_es_patience, mode="min",
                      min_delta=1e-4, check_on_train_epoch_end=False)
 
             trainer = _pl.Trainer(
