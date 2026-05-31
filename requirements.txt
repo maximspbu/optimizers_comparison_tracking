@@ -44,7 +44,7 @@ pyngrok==8.1.2
 pillow==11.1.0
 torchinfo
 tqdm==4.67.1
-protobuf==3.20.0          # required by some Ray/TF components
+protobuf>=3.20.3          # ray requires >=3.20.3
 
 # ── Notebooks (optional, not needed in Docker) ───────────────────────────────
 # ipykernel==6.29.5
