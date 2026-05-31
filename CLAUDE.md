@@ -31,7 +31,7 @@ python main.py \
   --task-type   regression|tabular_classification|image_classification|all \
   --datasets    superconductivity yearmsd \   # override defaults
   --model-types simple_mlp attention_mlp \   # override defaults
-  --num-samples 40 \                          # Optuna trials per optimizer
+  --num-samples 60 \                          # Optuna trials per optimizer
   --seeds       0 1 2 3 4 \
   --batch-size  256 \                         # 0 = task default
   --num-epochs  30 \                          # 0 = task default

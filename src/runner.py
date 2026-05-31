@@ -113,7 +113,7 @@ class ExperimentConfig:
     task_type: str                                    # regression | tabular_classification | image_classification
     datasets: list[str] = field(default_factory=list)
     model_types: list[str] = field(default_factory=list)
-    num_samples: int = 40
+    num_samples: int = 60
     seeds: list[int] = field(default_factory=lambda: [0, 1, 2, 3, 4])
     batch_size: int = 256
     num_epochs: int = 30
@@ -316,9 +316,15 @@ def _run_hpo(
 
     analysis_results: dict = {}
 
+    # n_startup_trials must be >= max_concurrent so all initial trials use random
+    # sampling and start simultaneously (TPE needs prior results before it can suggest;
+    # if n_startup_trials < max_concurrent some slots stay empty waiting for feedback).
+    _n_startup = max(max_concurrent, cfg_obj.num_samples // 3)
+
     for optimizer_class, hparam_space in optimizer_params.items():
         opt_name = optimizer_class.__name__
-        log.info("HPO  optimizer=%s  samples=%d", opt_name, cfg_obj.num_samples)
+        log.info("HPO  optimizer=%s  samples=%d  startup_trials=%d",
+                 opt_name, cfg_obj.num_samples, _n_startup)
 
         # Import these inside closure to ensure they're available in Ray workers
         _opt_cls = optimizer_class
@@ -389,8 +395,15 @@ def _run_hpo(
                     tune.report(bad); return
                 raise
 
+        import optuna as _optuna
+        _sampler = _optuna.samplers.TPESampler(
+            n_startup_trials=_n_startup,
+            seed=42,
+            multivariate=True,   # account for correlations between params
+            group=True,          # group-aware sampling for mixed param types
+        )
         searcher = ConcurrencyLimiter(
-            OptunaSearch(metric=metric, mode=mode, seed=42),
+            OptunaSearch(sampler=_sampler, metric=metric, mode=mode),
             max_concurrent=max_concurrent,
         )
         tracking_uri = cfg_obj.mlflow_uri
