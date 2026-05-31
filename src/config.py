@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 import subprocess
 from pprint import pprint
@@ -229,11 +230,17 @@ DEVICE: torch.device = torch.device(
 def detect_gpu_resources(n_gpus: int = 1) -> tuple[float, float, int]:
     """Return (gpu_per_trial, cpu_per_trial, max_concurrent) for Ray Tune.
 
-    Probes NVIDIA MPS; if running falls back to 1 GPU per trial.
-    With n_gpus GPUs, max_concurrent = n_gpus (one trial per GPU).
+    Distributes all available CPUs evenly across concurrent trials so DataLoader
+    workers and intra-op threads fill the machine.
     """
+    total_cpus = os.cpu_count() or 4
+
     if not torch.cuda.is_available() or n_gpus == 0:
-        return 0.0, 2.0, 4
+        cpu_per = max(2.0, float(total_cpus) / 4)
+        return 0.0, cpu_per, 4
+
+    # Leave 2 CPUs for Ray head + OS overhead
+    cpu_per_trial = max(2.0, float(total_cpus - 2) / n_gpus)
 
     mps_enabled = False
     try:
@@ -251,8 +258,10 @@ def detect_gpu_resources(n_gpus: int = 1) -> tuple[float, float, int]:
         pass
 
     if mps_enabled:
-        return 0.25, 0.5, min(n_gpus * 4, 8)
-    return 1.0, 2.0, n_gpus
+        concurrent = min(n_gpus * 4, 16)
+        cpu_mps = max(1.0, float(total_cpus - 2) / concurrent)
+        return 0.25, cpu_mps, concurrent
+    return 1.0, cpu_per_trial, n_gpus
 
 
 # ---------------------------------------------------------------------------

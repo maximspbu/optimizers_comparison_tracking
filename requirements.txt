@@ -45,3 +45,4 @@ pyngrok==8.1.2
 torchinfo>=0.2.0
 tqdm>=4.67.1
 protobuf>=3.20.3             # ray requires >=3.20.3; mlflow requires <8,>=3.12.0
+tensorboard>=2.14            # TensorBoard logging for PL trainer + Ray Tune HPO

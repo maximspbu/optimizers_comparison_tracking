@@ -38,6 +38,7 @@ from ray.tune import CLIReporter
 from ray.tune.schedulers import ASHAScheduler
 from ray.tune.search import ConcurrencyLimiter
 from ray.tune.search.optuna import OptunaSearch
+from pytorch_lightning.loggers import TensorBoardLogger
 from torch import nn
 from torch.utils.data import DataLoader
 import mlflow
@@ -62,6 +63,16 @@ from .vision_models import build_vision_model, list_vision_models
 log = logging.getLogger(__name__)
 
 sns.set_style("whitegrid")
+
+
+def _make_reporter(frequency: int = 30) -> Any:
+    """Return JupyterNotebookReporter in notebooks, CLIReporter otherwise."""
+    try:
+        from ray.tune.progress_reporter import JupyterNotebookReporter
+        return JupyterNotebookReporter(overwrite=True, max_report_frequency=frequency)
+    except Exception:
+        pass
+    return CLIReporter(max_report_frequency=frequency)
 
 # ---------------------------------------------------------------------------
 # Configuration dataclass
@@ -292,6 +303,7 @@ def _run_hpo(
     _MODEL_TYPE = model_type
     _BATCH = cfg_obj.batch_size
     _EPOCHS = cfg_obj.num_epochs
+    _CPU_PER_TRIAL = cpu_per_trial
 
     analysis_results: dict = {}
 
@@ -304,10 +316,16 @@ def _run_hpo(
 
         def wrap(config: dict) -> None:
             import sys, os as _os, warnings as _w, logging as _l
+            import torch as _torch
             sys.stderr = open(_os.devnull, "w")
             _w.filterwarnings("ignore")
             _l.getLogger("pytorch_lightning").setLevel(_l.ERROR)
             sys.unraisablehook = lambda *_: None
+
+            # Use allocated CPUs for intra-op threads and DataLoader workers
+            _n_torch_threads = max(1, int(_CPU_PER_TRIAL) - 1)
+            _n_workers = max(0, min(int(_CPU_PER_TRIAL) - 2, 8))
+            _torch.set_num_threads(_n_torch_threads)
 
             import pytorch_lightning as _pl
             from ray.tune.integration.pytorch_lightning import TuneReportCallback
@@ -342,7 +360,8 @@ def _run_hpo(
             )
             bad = _bad_result(_TASK)
             try:
-                dl_kw = dict(batch_size=_BATCH, num_workers=0, pin_memory=True)
+                dl_kw = dict(batch_size=_BATCH, num_workers=_n_workers,
+                             pin_memory=True, persistent_workers=_n_workers > 0)
                 trainer.fit(wrapper, _DL(train_ds, shuffle=True, **dl_kw),
                             _DL(val_ds, shuffle=False, **dl_kw))
             except (AssertionError, RuntimeError) as e:
@@ -376,13 +395,14 @@ def _run_hpo(
                 reduction_factor=2, brackets=1,
             ),
             resources_per_trial={"cpu": cpu_per_trial, "gpu": gpu_per_trial},
+            storage_path=str(Path(cfg_obj.output_dir) / "ray_results"),
             log_to_file=True,
             callbacks=[mlflow_cb],
-            progress_reporter=CLIReporter(max_report_frequency=float("inf")),
+            progress_reporter=_make_reporter(frequency=30),
             raise_on_failed_trial=False,
             fail_fast=False,
             max_failures=0,
-            verbose=0,
+            verbose=1,
         )
         analysis_results[optimizer_class] = analysis
         best = analysis.get_best_trial(metric, mode, "last")
@@ -448,8 +468,14 @@ def _run_evaluation(
                 sys_mon = SystemMonitorCallback()
                 sfcb = ScheduleFreeOptimizerCallback()
 
+                tb_logger = TensorBoardLogger(
+                    save_dir=str(Path(cfg_obj.output_dir) / "tensorboard"),
+                    name=exp_key,
+                    version=f"{opt_name}_seed{seed}",
+                )
                 trainer = pl.Trainer(
                     callbacks=[sfcb, sys_mon],
+                    logger=tb_logger,
                     max_epochs=cfg_obj.num_epochs,
                     accelerator="auto",
                     devices=max(1, cfg_obj.gpu_num),
