@@ -227,11 +227,18 @@ DEVICE: torch.device = torch.device(
 )
 
 
-def detect_gpu_resources(n_gpus: int = 1) -> tuple[float, float, int]:
+def detect_gpu_resources(
+    n_gpus: int = 1,
+    task_type: str = "tabular_classification",
+) -> tuple[float, float, int]:
     """Return (gpu_per_trial, cpu_per_trial, max_concurrent) for Ray Tune.
 
-    Distributes all available CPUs evenly across concurrent trials so DataLoader
-    workers and intra-op threads fill the machine.
+    Uses fractional GPU allocation so multiple trials share each card:
+      - tabular / regression  → 4 trials per GPU (MLP is tiny, ~300–500 MB)
+      - image classification  → 3 trials per GPU (ResNet/EfficientNet ~2–3 GB)
+
+    CPUs are distributed evenly; tabular tasks use num_workers=0 (data is
+    in-memory), so 1–2 CPU per trial is enough.
     """
     total_cpus = os.cpu_count() or 4
 
@@ -239,29 +246,13 @@ def detect_gpu_resources(n_gpus: int = 1) -> tuple[float, float, int]:
         cpu_per = max(2.0, float(total_cpus) / 4)
         return 0.0, cpu_per, 4
 
-    # Leave 2 CPUs for Ray head + OS overhead
-    cpu_per_trial = max(2.0, float(total_cpus - 2) / n_gpus)
+    trials_per_gpu = 3 if task_type == "image_classification" else 4
+    max_concurrent = n_gpus * trials_per_gpu
+    gpu_per_trial = 1.0 / trials_per_gpu
+    # Leave 2 CPUs for Ray head + OS
+    cpu_per_trial = max(1.0, float(total_cpus - 2) / max_concurrent)
 
-    mps_enabled = False
-    try:
-        subprocess.run(
-            ["nvidia-cuda-mps-control", "-d"],
-            capture_output=True, timeout=5,
-        )
-        probe = subprocess.run(
-            ["nvidia-cuda-mps-control"],
-            input="get_server_list\n",
-            capture_output=True, text=True, timeout=3,
-        )
-        mps_enabled = probe.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
-        pass
-
-    if mps_enabled:
-        concurrent = min(n_gpus * 4, 16)
-        cpu_mps = max(1.0, float(total_cpus - 2) / concurrent)
-        return 0.25, cpu_mps, concurrent
-    return 1.0, cpu_per_trial, n_gpus
+    return gpu_per_trial, cpu_per_trial, max_concurrent
 
 
 # ---------------------------------------------------------------------------

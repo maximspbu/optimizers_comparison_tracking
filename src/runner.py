@@ -331,9 +331,13 @@ def _run_hpo(
             _l.getLogger("pytorch_lightning").setLevel(_l.ERROR)
             sys.unraisablehook = lambda *_: None
 
-            # Use allocated CPUs for intra-op threads and DataLoader workers
-            _n_torch_threads = max(1, int(_CPU_PER_TRIAL) - 1)
-            _n_workers = max(0, min(int(_CPU_PER_TRIAL) - 2, 8))
+            # Tabular/regression data is tiny and in-memory — workers add overhead.
+            # Image tasks benefit from prefetch workers.
+            _n_torch_threads = max(1, int(_CPU_PER_TRIAL))
+            _n_workers = (
+                max(0, min(int(_CPU_PER_TRIAL) - 1, 4))
+                if _TASK == "image_classification" else 0
+            )
             _torch.set_num_threads(_n_torch_threads)
 
             import pytorch_lightning as _pl
@@ -887,7 +891,7 @@ def run_experiments(cfg_obj: ExperimentConfig) -> dict:
     )
 
     # GPU resource allocation
-    gpu_per_trial, cpu_per_trial, max_concurrent = cfg.detect_gpu_resources(cfg_obj.gpu_num)
+    gpu_per_trial, cpu_per_trial, max_concurrent = cfg.detect_gpu_resources(cfg_obj.gpu_num, task_type)
     log.info("GPU resources: gpu/trial=%.2f  cpu/trial=%.1f  max_concurrent=%d",
              gpu_per_trial, cpu_per_trial, max_concurrent)
 
