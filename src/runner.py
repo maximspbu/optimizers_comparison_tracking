@@ -909,11 +909,14 @@ def run_experiments(cfg_obj: ExperimentConfig) -> dict:
 
     # Pick optimizer parameter grids
     task_type = cfg_obj.task_type
-    optimizer_params = (
-        cfg.REGRESSION_OPTIMIZERS_PARAMS
-        if task_type == "regression"
-        else cfg.CLASSIFICATION_OPTIMIZERS_PARAMS
-    )
+    optimizer_params_by_task = {
+        "regression": cfg.REGRESSION_OPTIMIZERS_PARAMS,
+        "tabular_classification": cfg.CLASSIFICATION_OPTIMIZERS_PARAMS,
+        "image_classification": cfg.IMAGE_CLASSIFICATION_OPTIMIZERS_PARAMS,
+    }
+    optimizer_params = optimizer_params_by_task[task_type]
+    cfg.validate_required_optimizers(optimizer_params, task_type)
+    log.info("OPTIMIZERS  task=%s  names=%s", task_type, cfg.optimizer_names(optimizer_params))
 
     # GPU resource allocation
     gpu_per_trial, cpu_per_trial, max_concurrent = cfg.detect_gpu_resources(cfg_obj.gpu_num, task_type)

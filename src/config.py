@@ -16,18 +16,6 @@ import torch
 from ray import tune
 from torch.optim import AdamW
 
-from .optimizers import AdaBound
-
-try:
-    from torch_optimizer import Adahessian as AdaHessian
-except ImportError:
-    AdaHessian = None  # type: ignore[assignment]
-
-try:
-    from adabelief_pytorch import AdaBelief
-except ImportError:
-    AdaBelief = None  # type: ignore[assignment]
-
 try:
     from lion_pytorch import Lion
 except ImportError:
@@ -63,12 +51,17 @@ SEED: int = 0
 SEEDS: tuple[int, ...] = (0, 1, 2, 3, 4)
 NUM_THREADS: int = 4
 SKIP_KEYS: frozenset[str] = frozenset({"experiment_name", "tracking_uri", "seed"})
+REQUIRED_OPTIMIZER_NAMES: tuple[str, ...] = (
+    "AdamW",
+    "Stacey_p2",
+    "Lion",
+    "AdamWScheduleFree",
+    "GaLoreAdamW",
+    "AdEMAMix",
+)
 
 TORCH_GENERATOR: torch.Generator = torch.Generator()
 TORCH_GENERATOR.manual_seed(SEED)
-
-# Grid search over seeds (legacy runner)
-SEED_GRID = tune.grid_search(list(SEEDS))
 
 # ---------------------------------------------------------------------------
 # Optimizer grids – Regression (notebook-style, Optuna/loguniform)
@@ -166,53 +159,30 @@ def _build_classification_params() -> dict:
 
 CLASSIFICATION_OPTIMIZERS_PARAMS: dict = _build_classification_params()
 
-# Legacy grid-search grids (used by old runner / notebooks)
-OPTIMIZERS_PARAMS: dict = {
-    **(
-        {AdaHessian: {
-            "lr": tune.grid_search([1e-2, 1e-1, 0.15, 1.0]),
-            "weight_decay": tune.grid_search([0, 1e-4, 1e-3, 1e-2]),
-            "hessian_power": tune.grid_search([0.5, 0.75, 1.0]),
-            "seed": SEED_GRID,
-        }} if AdaHessian is not None else {}
-    ),
-    **(
-        {Lion: {
-            "lr": tune.grid_search([1e-4, 1e-3, 1e-2, 1e-1]),
-            "weight_decay": tune.grid_search([1e-4, 1e-3, 1e-2]),
-            "decoupled_weight_decay": tune.grid_search([False, True]),
-            "use_triton": tune.grid_search([False]),
-            "seed": SEED_GRID,
-        }} if Lion is not None else {}
-    ),
-    **(
-        {AdaBelief: {
-            "lr": tune.grid_search([1e-4, 1e-3, 1e-2, 1e-1]),
-            "weight_decay": tune.grid_search([0, 1e-4, 1e-3, 1e-2]),
-            "amsgrad": tune.grid_search([False, True]),
-            "weight_decouple": tune.grid_search([False, True]),
-            "rectify": tune.grid_search([False, True]),
-            "print_change_log": tune.grid_search([False]),
-            "seed": SEED_GRID,
-        }} if AdaBelief is not None else {}
-    ),
-    AdamW: {
-        "lr": tune.grid_search([1e-4, 1e-3, 1e-2, 1e-1]),
-        "weight_decay": tune.grid_search([0, 1e-4, 1e-3, 1e-2]),
-        "amsgrad": tune.grid_search([False, True]),
-        "seed": SEED_GRID,
-    },
-    AdaBound: {
-        "lr": tune.grid_search([1e-7, 1e-6, 1e-5, 1e-4]),
-        "final_lr": tune.grid_search([1e-7, 1e-6, 1e-5]),
-        "gamma": tune.grid_search([1e-4, 1e-3, 1e-2]),
-        "weight_decay": tune.grid_search([0, 1e-4, 1e-3]),
-        "amsbound": tune.grid_search([False, True]),
-        "seed": SEED_GRID,
-    },
-}
-
 IMAGE_CLASSIFICATION_OPTIMIZERS_PARAMS: dict = CLASSIFICATION_OPTIMIZERS_PARAMS
+OPTIMIZERS_PARAMS: dict = CLASSIFICATION_OPTIMIZERS_PARAMS
+
+
+def optimizer_names(optimizer_params: dict) -> list[str]:
+    """Return optimizer class names in the order they will run."""
+    return [optimizer_class.__name__ for optimizer_class in optimizer_params]
+
+
+def validate_required_optimizers(optimizer_params: dict, task_type: str) -> None:
+    """Fail fast if a required optimizer dependency was not imported."""
+    present = set(optimizer_names(optimizer_params))
+    missing = [name for name in REQUIRED_OPTIMIZER_NAMES if name not in present]
+    extra = [name for name in present if name not in REQUIRED_OPTIMIZER_NAMES]
+    if missing or extra:
+        parts = []
+        if missing:
+            parts.append(f"missing required optimizers: {', '.join(missing)}")
+        if extra:
+            parts.append(f"unexpected optimizers: {', '.join(sorted(extra))}")
+        raise RuntimeError(
+            f"Invalid optimizer set for task_type={task_type!r}: {'; '.join(parts)}. "
+            "Install/import exactly: " + ", ".join(REQUIRED_OPTIMIZER_NAMES)
+        )
 
 # ---------------------------------------------------------------------------
 # Device / GPU resource detection
