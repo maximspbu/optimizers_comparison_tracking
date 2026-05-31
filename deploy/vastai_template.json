@@ -1,0 +1,20 @@
+{
+  "comment": "vast.ai instance search criteria. Edit gpu_name and num_gpus as needed.",
+  "gpu_name": "RTX_4090",
+  "num_gpus": 4,
+  "disk_space": 100,
+  "cuda_vers": 12.4,
+  "rentable": true,
+  "order": "dph_total",
+  "gpu_alternatives": [
+    "A100_SXM4_80GB",
+    "A100_PCIE_80GB",
+    "H100_SXM5_80GB",
+    "RTX_3090"
+  ],
+  "recommended_disk_gb_per_task": {
+    "regression": 20,
+    "tabular_classification": 20,
+    "image_classification": 100
+  }
+}
