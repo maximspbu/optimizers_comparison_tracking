@@ -113,7 +113,7 @@ class ExperimentConfig:
     task_type: str                                    # regression | tabular_classification | image_classification
     datasets: list[str] = field(default_factory=list)
     model_types: list[str] = field(default_factory=list)
-    num_samples: int = 60
+    num_samples: int = 96
     seeds: list[int] = field(default_factory=lambda: [0, 1, 2, 3, 4])
     batch_size: int = 256
     num_epochs: int = 30
@@ -432,7 +432,7 @@ def _run_hpo(
                 search_alg=searcher,
                 scheduler=ASHAScheduler(
                     max_t=cfg_obj.num_epochs,
-                    grace_period=max(1, cfg_obj.num_epochs // 8),
+                    grace_period=max(1, cfg_obj.num_epochs // 4),
                     reduction_factor=2, brackets=1,
                 ),
                 num_samples=cfg_obj.num_samples,

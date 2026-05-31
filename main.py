@@ -77,7 +77,7 @@ def _parse_args() -> argparse.Namespace:
     )
 
     # HPO
-    p.add_argument("--num-samples", type=int, default=40,
+    p.add_argument("--num-samples", type=int, default=96,
                    help="Number of Optuna trials per optimizer.")
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4],
                    help="Random seeds for multi-seed evaluation.")

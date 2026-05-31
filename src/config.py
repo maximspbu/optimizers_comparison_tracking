@@ -249,8 +249,7 @@ def detect_gpu_resources(
     trials_per_gpu = 3 if task_type == "image_classification" else 4
     max_concurrent = n_gpus * trials_per_gpu
     gpu_per_trial = 1.0 / trials_per_gpu
-    # Leave 2 CPUs for Ray head + OS
-    cpu_per_trial = max(1.0, float(total_cpus - 2) / max_concurrent)
+    cpu_per_trial = max(1.0, float(total_cpus) / max_concurrent)
 
     return gpu_per_trial, cpu_per_trial, max_concurrent
 
