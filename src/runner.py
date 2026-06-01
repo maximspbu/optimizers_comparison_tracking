@@ -105,11 +105,15 @@ def _is_interactive_environment() -> bool:
 
 
 def _lightning_strategy(gpu_num: int) -> str:
-    if gpu_num <= 1:
-        return "auto"
-    if _is_interactive_environment():
-        return "ddp_notebook"
-    return "ddp"
+    if gpu_num > 1 and not _is_interactive_environment():
+        return "ddp"
+    return "auto"
+
+
+def _lightning_devices(gpu_num: int) -> int:
+    if gpu_num > 1 and _is_interactive_environment():
+        return 1
+    return max(1, gpu_num)
 
 
 def _make_reporter(frequency: int = 30) -> Any:
@@ -697,7 +701,7 @@ def _run_evaluation(
                     max_epochs=cfg_obj.num_epochs,
                     max_time={"hours": 2} if task_type == "image_classification" else None,
                     accelerator="auto",
-                    devices=max(1, cfg_obj.gpu_num),
+                    devices=_lightning_devices(cfg_obj.gpu_num),
                     strategy=_lightning_strategy(cfg_obj.gpu_num),
                     precision="16-mixed" if task_type != "regression" else "32-true",
                     enable_progress_bar=False,
