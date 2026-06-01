@@ -90,13 +90,19 @@ def load_telemetry(log_path: str) -> pd.DataFrame:
 def telemetry_summary(df: pd.DataFrame) -> pd.DataFrame:
     """Aggregate telemetry records: mean/std/max resource usage per optimizer.
 
-    Expects columns: optimizer, cpu_pct, ram_gb.
+    Supports both current summary records (avg_* scalar fields plus nested
+    cpu_pct/ram_gb stats) and older per-epoch records (scalar cpu_pct/ram_gb).
     """
     if df.empty or "optimizer" not in df.columns:
         return pd.DataFrame()
 
     agg: dict[str, list] = {"optimizer": []}
-    scalar_cols = [c for c in ("cpu_pct", "ram_gb") if c in df.columns]
+    preferred_cols = ("avg_cpu_pct", "avg_ram_gb", "avg_gpu_gb", "avg_gpu_util_pct")
+    fallback_cols = ("cpu_pct", "ram_gb")
+    scalar_cols = [c for c in preferred_cols if c in df.columns]
+    if not scalar_cols:
+        scalar_cols = [c for c in fallback_cols if c in df.columns]
+
     for col in scalar_cols:
         for stat in ("mean", "std", "max"):
             agg[f"{col}_{stat}"] = []
@@ -104,9 +110,15 @@ def telemetry_summary(df: pd.DataFrame) -> pd.DataFrame:
     for opt, group in df.groupby("optimizer"):
         agg["optimizer"].append(opt)
         for col in scalar_cols:
-            vals = group[col].dropna()
-            agg[f"{col}_mean"].append(float(np.mean(vals)) if len(vals) else float("nan"))
-            agg[f"{col}_std"].append(float(np.std(vals)) if len(vals) else float("nan"))
-            agg[f"{col}_max"].append(float(np.max(vals)) if len(vals) else float("nan"))
+            vals = pd.to_numeric(group[col], errors="coerce").dropna()
+            if len(vals):
+                arr = vals.to_numpy(dtype=float)
+                agg[f"{col}_mean"].append(float(np.mean(arr)))
+                agg[f"{col}_std"].append(float(np.std(arr)))
+                agg[f"{col}_max"].append(float(np.max(arr)))
+            else:
+                agg[f"{col}_mean"].append(float("nan"))
+                agg[f"{col}_std"].append(float("nan"))
+                agg[f"{col}_max"].append(float("nan"))
 
     return pd.DataFrame(agg).set_index("optimizer")
