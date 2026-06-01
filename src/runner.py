@@ -177,7 +177,7 @@ class ExperimentConfig:
     mock_max_rows: int = 1000
     mock_max_imgs: int = 200
     output_dir: str = "./outputs"
-    mlflow_uri: str = "./mlruns"
+    mlflow_uri: str = "./mlflow.db"
     data_dir: str = "./data"
     num_workers: int = 4
     kaggle_json: str | None = None
@@ -198,11 +198,24 @@ class ExperimentConfig:
             self.num_samples = 2
             self.num_epochs = 2
             self.seeds = self.seeds[:1]
+        self.mlflow_uri = _normalize_mlflow_uri(self.mlflow_uri)
 
 
 # ---------------------------------------------------------------------------
 # Output path helpers
 # ---------------------------------------------------------------------------
+
+
+def _normalize_mlflow_uri(uri: str) -> str:
+    """Use SQLite for local MLflow tracking; MLflow 3.7+ rejects file stores by default."""
+    if "://" in uri:
+        return uri
+
+    path = Path(uri).expanduser()
+    if path.suffix != ".db":
+        path = path / "mlflow.db"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return f"sqlite:///{path.resolve()}"
 
 
 def _makedirs(output_dir: str) -> None:
