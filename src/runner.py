@@ -136,8 +136,8 @@ TASK_DEFAULTS: dict[str, dict] = {
         "datasets": list(REGRESSION_DATASETS),
         "model_types": ["simple_mlp", "residual_mlp"],
         "batch_size": 256,
-        "num_epochs": 30,
-        "num_samples": 4,
+        "num_epochs": 50,
+        "num_samples": 8,
     },
     "tabular_classification": {
         "datasets": list(TABULAR_CLS_DATASETS),
@@ -150,8 +150,8 @@ TASK_DEFAULTS: dict[str, dict] = {
         "datasets": list(IMAGE_CLS_DATASETS),
         "model_types": ["resnet18", "efficientnet_v2_s"],
         "batch_size": 64,
-        "num_epochs": 12,
-        "num_samples": 3,
+        "num_epochs": 24,
+        "num_samples": 8,
     },
 }
 

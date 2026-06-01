@@ -154,7 +154,51 @@ def _build_classification_params() -> dict:
 
 CLASSIFICATION_OPTIMIZERS_PARAMS: dict = _build_classification_params()
 
-IMAGE_CLASSIFICATION_OPTIMIZERS_PARAMS: dict = CLASSIFICATION_OPTIMIZERS_PARAMS
+
+def _build_image_classification_params() -> dict:
+    """Conservative LR ranges for pretrained vision backbones."""
+    params: dict = {}
+    if Lion is not None:
+        params[Lion] = {
+            "lr": tune.loguniform(1e-5, 3e-4),
+            "weight_decay": tune.choice([0, 1e-5, 1e-4, 1e-3]),
+            "decoupled_weight_decay": tune.choice([False, True]),
+        }
+    if AdEMAMix is not None:
+        params[AdEMAMix] = {
+            "lr": tune.loguniform(1e-5, 3e-3),
+            "weight_decay": tune.choice([0, 1e-5, 1e-4, 1e-3]),
+            "alpha": tune.uniform(2.0, 12.0),
+        }
+    if AdamWScheduleFree is not None:
+        params[AdamWScheduleFree] = {
+            "lr": tune.loguniform(1e-5, 1e-2),
+            "weight_decay": tune.choice([0, 1e-5, 1e-4, 1e-3, 1e-2]),
+            "r": tune.uniform(0.0, 1.0),
+            "weight_lr_power": tune.uniform(0.5, 2.0),
+        }
+    if GaLoreAdamW is not None:
+        params[GaLoreAdamW] = {
+            "lr": tune.loguniform(1e-5, 3e-3),
+            "weight_decay": tune.choice([0, 1e-5, 1e-4, 1e-3]),
+            "correct_bias": tune.choice([False, True]),
+        }
+    if Stacey_pp is not None:
+        params[Stacey_pp] = {
+            "lr_tau": tune.loguniform(1e-5, 1e-2),
+            "lr_eta": tune.loguniform(1e-5, 1e-2),
+            "lr_alpha": tune.loguniform(1e-5, 1e-2),
+            "weight_decay": tune.choice([0, 1e-5, 1e-4, 1e-3]),
+        }
+    params[AdamW] = {
+        "lr": tune.loguniform(1e-5, 3e-3),
+        "weight_decay": tune.loguniform(1e-6, 1e-2),
+        "amsgrad": tune.choice([False, True]),
+    }
+    return params
+
+
+IMAGE_CLASSIFICATION_OPTIMIZERS_PARAMS: dict = _build_image_classification_params()
 OPTIMIZERS_PARAMS: dict = CLASSIFICATION_OPTIMIZERS_PARAMS
 
 

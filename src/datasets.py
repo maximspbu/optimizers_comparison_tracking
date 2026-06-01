@@ -583,16 +583,31 @@ class _SubsetWithTransform(Dataset):
         return img, label
 
 
-def _get_image_transforms(img_size: int = 224, augment: bool = False):
+def _get_image_transforms(img_size: int = 224, augment: bool = False, dataset_name: str | None = None):
     from torchvision import transforms
 
     normalize = transforms.Normalize(
         mean=[0.485, 0.456, 0.406],
         std=[0.229, 0.224, 0.225],
     )
+    if dataset_name == "cifar100":
+        if augment:
+            return transforms.Compose([
+                transforms.Resize(img_size),
+                transforms.RandomCrop(img_size, padding=16),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                normalize,
+            ])
+        return transforms.Compose([
+            transforms.Resize(img_size),
+            transforms.ToTensor(),
+            normalize,
+        ])
+
     if augment:
         return transforms.Compose([
-            transforms.RandomResizedCrop(img_size),
+            transforms.RandomResizedCrop(img_size, scale=(0.6, 1.0), ratio=(0.9, 1.1)),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             normalize,
@@ -639,9 +654,9 @@ def load_image_dataset(
             full, [n_train, n_val, n_test], generator=gen
         )
         return (
-            _SubsetWithTransform(t_sub, _get_image_transforms(img_size, augment=True)),
-            _SubsetWithTransform(v_sub, _get_image_transforms(img_size, augment=False)),
-            _SubsetWithTransform(te_sub, _get_image_transforms(img_size, augment=False)),
+            _SubsetWithTransform(t_sub, _get_image_transforms(img_size, augment=True, dataset_name=name)),
+            _SubsetWithTransform(v_sub, _get_image_transforms(img_size, augment=False, dataset_name=name)),
+            _SubsetWithTransform(te_sub, _get_image_transforms(img_size, augment=False, dataset_name=name)),
             num_classes,
         )
 
@@ -654,7 +669,7 @@ def load_image_dataset(
             root=data_dir,
             train=False,
             download=True,
-            transform=_get_image_transforms(img_size, augment=False),
+            transform=_get_image_transforms(img_size, augment=False, dataset_name=name),
         )
         n = len(full_train)
         n_t = int((1 - val_frac) * n)
@@ -662,8 +677,8 @@ def load_image_dataset(
         gen = torch.Generator().manual_seed(seed)
         t_sub, v_sub = torch.utils.data.random_split(full_train, [n_t, n_v], generator=gen)
         return (
-            _SubsetWithTransform(t_sub, _get_image_transforms(img_size, augment=True)),
-            _SubsetWithTransform(v_sub, _get_image_transforms(img_size, augment=False)),
+            _SubsetWithTransform(t_sub, _get_image_transforms(img_size, augment=True, dataset_name=name)),
+            _SubsetWithTransform(v_sub, _get_image_transforms(img_size, augment=False, dataset_name=name)),
             test_ds,
             num_classes,
         )
@@ -709,12 +724,12 @@ def load_image_dataset(
         n_v = n - n_t
         gen = torch.Generator().manual_seed(seed)
         t_sub, v_sub = torch.utils.data.random_split(full, [n_t, n_v], generator=gen)
-        train_ds = _SubsetWithTransform(t_sub, _get_image_transforms(img_size, augment=True))
-        val_ds = _SubsetWithTransform(v_sub, _get_image_transforms(img_size, augment=False))
+        train_ds = _SubsetWithTransform(t_sub, _get_image_transforms(img_size, augment=True, dataset_name=name))
+        val_ds = _SubsetWithTransform(v_sub, _get_image_transforms(img_size, augment=False, dataset_name=name))
 
         test_dir = resolve_local_path(test_paths)
         if test_dir:
-            test_ds = ImageFolder(test_dir, transform=_get_image_transforms(img_size, augment=False))
+            test_ds = ImageFolder(test_dir, transform=_get_image_transforms(img_size, augment=False, dataset_name=name))
         else:
             log.warning("Intel test dir not found — reusing val split.")
             test_ds = val_ds
