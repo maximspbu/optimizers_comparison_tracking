@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+os.environ.setdefault("MPLCONFIGDIR", "/private/tmp/matplotlib")
+
 import matplotlib
 
 matplotlib.use("Agg")  # headless rendering
@@ -85,21 +87,24 @@ def _make_reporter(frequency: int = 30) -> Any:
 TASK_DEFAULTS: dict[str, dict] = {
     "regression": {
         "datasets": list(REGRESSION_DATASETS),
-        "model_types": ["simple_mlp", "attention_mlp"],
+        "model_types": ["simple_mlp", "residual_mlp"],
         "batch_size": 256,
-        "num_epochs": 100,
+        "num_epochs": 30,
+        "num_samples": 40,
     },
     "tabular_classification": {
         "datasets": list(TABULAR_CLS_DATASETS),
         "model_types": ["simple_cls", "attention_cls"],
         "batch_size": 1024,
-        "num_epochs": 100,
+        "num_epochs": 26,
+        "num_samples": 40,
     },
     "image_classification": {
         "datasets": list(IMAGE_CLS_DATASETS),
         "model_types": ["resnet18", "efficientnet_v2_s"],
         "batch_size": 64,
-        "num_epochs": 50,
+        "num_epochs": 12,
+        "num_samples": 16,
     },
 }
 
@@ -116,10 +121,10 @@ class ExperimentConfig:
     task_type: str  # regression | tabular_classification | image_classification
     datasets: list[str] = field(default_factory=list)
     model_types: list[str] = field(default_factory=list)
-    num_samples: int = 96
+    num_samples: int = 0
     seeds: list[int] = field(default_factory=lambda: [0, 1, 2, 3, 4])
-    batch_size: int = 256
-    num_epochs: int = 30
+    batch_size: int = 0
+    num_epochs: int = 0
     gpu_num: int = 1
     mock_run: bool = False
     mock_max_rows: int = 1000
@@ -136,6 +141,12 @@ class ExperimentConfig:
             self.datasets = defaults.get("datasets", [])
         if not self.model_types:
             self.model_types = defaults.get("model_types", [])
+        if self.batch_size <= 0:
+            self.batch_size = defaults.get("batch_size", 256)
+        if self.num_epochs <= 0:
+            self.num_epochs = defaults.get("num_epochs", 30)
+        if self.num_samples <= 0:
+            self.num_samples = defaults.get("num_samples", 40)
         if self.mock_run:
             self.num_samples = 4
             self.num_epochs = 2
@@ -199,6 +210,7 @@ def _load_datasets(
             dataset_name,
             seed=seed,
             data_dir=cfg_obj.data_dir,
+            kaggle_json=cfg_obj.kaggle_json,
         )
         if max_rows:
             import torch as _torch
@@ -252,12 +264,36 @@ def _build_model(task_type: str, model_type: str, n_features: int, n_classes: in
     )
 
 
+def _targets_from_dataset(ds) -> torch.Tensor | None:
+    from torch.utils.data import Subset, TensorDataset
+
+    if isinstance(ds, TensorDataset) and len(ds.tensors) >= 2:
+        return ds.tensors[1].detach().cpu().long()
+    if isinstance(ds, Subset):
+        base = _targets_from_dataset(ds.dataset)
+        if base is None:
+            return None
+        return base[torch.as_tensor(ds.indices, dtype=torch.long)]
+    return None
+
+
+def _class_weights_from_dataset(ds, n_classes: int) -> torch.Tensor | None:
+    targets = _targets_from_dataset(ds)
+    if targets is None or targets.numel() == 0:
+        return None
+    counts = torch.bincount(targets, minlength=n_classes).float()
+    counts = counts.clamp_min(1.0)
+    weights = counts.sum() / (n_classes * counts)
+    return weights.float()
+
+
 def _make_wrapper(
     task_type: str,
     model: nn.Module,
     optimizer_class,
     hparams: dict,
     n_classes: int,
+    loss_fn: nn.Module | None = None,
 ):
     """Return (Lightning wrapper, tune_metrics dict)."""
     if task_type == "regression":
@@ -265,7 +301,7 @@ def _make_wrapper(
             model=model,
             optimizer_class=optimizer_class,
             optimizer_hparams=hparams,
-            loss_fn=nn.MSELoss(),
+            loss_fn=loss_fn or nn.MSELoss(),
         )
         tune_metrics = {
             "val_loss": "val_loss",
@@ -279,7 +315,7 @@ def _make_wrapper(
             model=model,
             optimizer_class=optimizer_class,
             optimizer_hparams=hparams,
-            loss_fn=nn.CrossEntropyLoss(),
+            loss_fn=loss_fn or nn.CrossEntropyLoss(),
             num_classes=n_classes,
         )
         tune_metrics = {
@@ -292,9 +328,11 @@ def _make_wrapper(
     return wrapper, tune_metrics
 
 
-def _hpo_metric(task_type: str) -> tuple[str, str]:
+def _hpo_metric(task_type: str, dataset_name: str | None = None) -> tuple[str, str]:
     if task_type == "regression":
         return "val_r2", "max"
+    if task_type == "tabular_classification" and dataset_name == "creditcard":
+        return "val_f1score", "max"
     return "val_accuracy", "max"
 
 
@@ -320,6 +358,10 @@ def _test_metric_keys(task_type: str) -> list[str]:
     if task_type == "regression":
         return ["test_mse", "test_mae", "test_r2", "test_rmse"]
     return ["test_accuracy", "test_f1score", "test_precision", "test_recall"]
+
+
+def _classification_primary_test_metric(dataset_name: str | None = None) -> str:
+    return "test_f1score" if dataset_name == "creditcard" else "test_accuracy"
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +396,7 @@ def _run_hpo(
     """
     import optuna as _optuna
 
-    metric, mode = _hpo_metric(task_type)
+    metric, mode = _hpo_metric(task_type, dataset_name)
     skip_keys = cfg.SKIP_KEYS
     _NUM_FEATURES = n_features
     _N_CLASSES = n_classes
@@ -420,7 +462,12 @@ def _run_hpo(
                 hparams["no_deprecation_warning"] = True
 
             model = _build_model(_TASK, _MODEL_TYPE, _NUM_FEATURES, _N_CLASSES)
-            wrapper, tune_metrics = _make_wrapper(_TASK, model, _opt_cls, hparams, _N_CLASSES)
+            loss_fn = None
+            if _TASK == "tabular_classification" and dataset_name == "creditcard":
+                class_weights = _class_weights_from_dataset(train_ds, _N_CLASSES)
+                if class_weights is not None:
+                    loss_fn = _torch.nn.CrossEntropyLoss(weight=class_weights)
+            wrapper, tune_metrics = _make_wrapper(_TASK, model, _opt_cls, hparams, _N_CLASSES, loss_fn=loss_fn)
             tune_cb = TuneReportCallback(tune_metrics, on="validation_end")
             from pytorch_lightning.callbacks import EarlyStopping as _ES
 
@@ -438,6 +485,7 @@ def _run_hpo(
             trainer = _pl.Trainer(
                 callbacks=[tune_cb, sfcb, es],
                 max_epochs=_EPOCHS,
+                max_time={"hours": 1} if _TASK == "image_classification" else None,
                 accelerator="auto",
                 devices=1,
                 precision="16-mixed" if _TASK != "regression" else "32-true",
@@ -570,7 +618,19 @@ def _run_evaluation(
                 mlflow.log_param("dataset", dataset_name)
 
                 model = _build_model(task_type, model_type, n_features, n_classes)
-                wrapper, _ = _make_wrapper(task_type, model, optimizer_class, hparams, n_classes)
+                loss_fn = None
+                if task_type == "tabular_classification" and dataset_name == "creditcard":
+                    class_weights = _class_weights_from_dataset(train_ds, n_classes)
+                    if class_weights is not None:
+                        loss_fn = nn.CrossEntropyLoss(weight=class_weights)
+                wrapper, _ = _make_wrapper(
+                    task_type,
+                    model,
+                    optimizer_class,
+                    hparams,
+                    n_classes,
+                    loss_fn=loss_fn,
+                )
                 mlflow.pytorch.autolog(log_every_n_step=0)
                 sys_mon = SystemMonitorCallback()
                 sfcb = ScheduleFreeOptimizerCallback()
@@ -590,6 +650,7 @@ def _run_evaluation(
                     callbacks=[sfcb, sys_mon, es],
                     logger=tb_logger,
                     max_epochs=cfg_obj.num_epochs,
+                    max_time={"hours": 2} if task_type == "image_classification" else None,
                     accelerator="auto",
                     devices=max(1, cfg_obj.gpu_num),
                     strategy="ddp" if cfg_obj.gpu_num > 1 else "auto",
@@ -635,7 +696,11 @@ def _run_evaluation(
 # ---------------------------------------------------------------------------
 
 
-def _build_tuned_summary(seed_results: dict[str, list[dict]], task_type: str) -> pd.DataFrame:
+def _build_tuned_summary(
+    seed_results: dict[str, list[dict]],
+    task_type: str,
+    dataset_name: str | None = None,
+) -> pd.DataFrame:
     rows = []
     for opt_name, runs in seed_results.items():
         if task_type == "regression":
@@ -652,10 +717,15 @@ def _build_tuned_summary(seed_results: dict[str, list[dict]], task_type: str) ->
                 }
             )
         else:
+            primary = _classification_primary_test_metric(dataset_name)
+            vals = [r[primary] for r in runs if not np.isnan(r.get(primary, float("nan")))]
             accs = [r["test_accuracy"] for r in runs if not np.isnan(r.get("test_accuracy", float("nan")))]
             rows.append(
                 {
                     "optimizer": opt_name,
+                    f"{primary}_min": min(vals) if vals else float("nan"),
+                    f"{primary}_median": statistics.median(vals) if vals else float("nan"),
+                    f"{primary}_max": max(vals) if vals else float("nan"),
                     "acc_min": min(accs) if accs else float("nan"),
                     "acc_median": statistics.median(accs) if accs else float("nan"),
                     "acc_max": max(accs) if accs else float("nan"),
@@ -669,8 +739,9 @@ def _build_tuned_summary(seed_results: dict[str, list[dict]], task_type: str) ->
 def _build_comparison_df(
     task_type: str,
     analysis_results: dict,
+    dataset_name: str | None = None,
 ) -> pd.DataFrame:
-    metric, mode = _hpo_metric(task_type)
+    metric, mode = _hpo_metric(task_type, dataset_name)
     rows = []
     for opt_cls, result_grid in analysis_results.items():
         best = result_grid.get_best_result(metric=metric, mode=mode)
@@ -875,11 +946,11 @@ def _run_experiment_pair(
     )
 
     # 3. Comparison DataFrame
-    comparison_df = _build_comparison_df(task_type, analysis_results)
+    comparison_df = _build_comparison_df(task_type, analysis_results, dataset_name=dataset_name)
     _save_df(comparison_df, _result_path(cfg_obj.output_dir, exp_key, "comparison.csv"))
 
     # 3b. Best-trial metric curves (using best trial's final values as reference)
-    metric, mode = _hpo_metric(task_type)
+    metric, mode = _hpo_metric(task_type, dataset_name)
     for m in ["val_r2", "val_rmse"] if task_type == "regression" else ["val_accuracy", "val_f1score"]:
         _save_metric_curves(
             analysis_results,
@@ -918,19 +989,20 @@ def _run_experiment_pair(
         telemetry_logger,
         exp_key,
     )
-    tuned_summary = _build_tuned_summary(tuned_seed_results, task_type)
+    tuned_summary = _build_tuned_summary(tuned_seed_results, task_type, dataset_name=dataset_name)
     _save_df(tuned_summary, _result_path(cfg_obj.output_dir, exp_key, "tuned_summary.csv"))
 
+    primary_test_metric = "test_r2" if task_type == "regression" else _classification_primary_test_metric(dataset_name)
     tuned_best = {
         opt_name: max(
             [
                 r
                 for r in runs
                 if not np.isnan(
-                    r.get("test_r2" if task_type == "regression" else "test_accuracy", float("nan"))
+                    r.get(primary_test_metric, float("nan"))
                 )
             ],
-            key=lambda r: r.get("test_r2" if task_type == "regression" else "test_accuracy", float("-inf")),
+            key=lambda r: r.get(primary_test_metric, float("-inf")),
             default=runs[0] if runs else {},
         )
         for opt_name, runs in tuned_seed_results.items()
@@ -956,7 +1028,7 @@ def _run_experiment_pair(
         telemetry_logger,
         exp_key,
     )
-    default_summary = _build_tuned_summary(default_seed_results, task_type)
+    default_summary = _build_tuned_summary(default_seed_results, task_type, dataset_name=dataset_name)
     _save_df(default_summary, _result_path(cfg_obj.output_dir, exp_key, "default_summary.csv"))
 
     default_best = {
@@ -965,10 +1037,10 @@ def _run_experiment_pair(
                 r
                 for r in runs
                 if not np.isnan(
-                    r.get("test_r2" if task_type == "regression" else "test_accuracy", float("nan"))
+                    r.get(primary_test_metric, float("nan"))
                 )
             ],
-            key=lambda r: r.get("test_r2" if task_type == "regression" else "test_accuracy", float("-inf")),
+            key=lambda r: r.get(primary_test_metric, float("-inf")),
             default=runs[0] if runs else {},
         )
         for opt_name, runs in default_seed_results.items()

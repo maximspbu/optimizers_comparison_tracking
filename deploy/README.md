@@ -19,7 +19,8 @@ docker login
 ```
 
 The image is based on `pytorch/pytorch:2.7.0-cuda12.6-cudnn9-runtime` and
-includes all Python dependencies plus the AdEMAMix and Stacey git repos.
+includes all Python dependencies plus the AdEMAMix git repo. Stacey++ is
+vendored locally in `src/optimizers.py`.
 
 ### 2. Rent a GPU instance
 

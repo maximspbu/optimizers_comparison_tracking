@@ -5,10 +5,6 @@ from __future__ import annotations
 import logging
 import os
 import random
-import subprocess
-import sys
-import importlib
-from pathlib import Path
 from pprint import pprint
 
 import mlflow
@@ -35,42 +31,10 @@ except ImportError:
     AdamWScheduleFree = None  # type: ignore[assignment]
 
 try:
-    from .optimizers import GaLoreAdamW
+    from .optimizers import GaLoreAdamW, Stacey_pp
 except ImportError:
     GaLoreAdamW = None  # type: ignore[assignment]
-
-def _import_stacey_p2():
-    """Import Stacey_p2 from the adjacent Stacey clone used on servers."""
-    try:
-        return importlib.import_module("Stacey.Stacey.staceyp2").Stacey_p2
-    except Exception:
-        pass
-
-    project_root = Path(__file__).resolve().parents[1]
-    stacey_repo = project_root / "Stacey"
-    stacey_pkg = stacey_repo / "Stacey"
-
-    bad_path = str(stacey_repo)
-    while bad_path in sys.path:
-        sys.path.remove(bad_path)
-
-    for path in (project_root, stacey_pkg):
-        path_str = str(path)
-        if path.exists() and path_str not in sys.path:
-            sys.path.insert(0, path_str)
-
-    importlib.invalidate_caches()
-    for module_name in list(sys.modules):
-        if module_name == "Stacey" or module_name.startswith("Stacey."):
-            del sys.modules[module_name]
-
-    try:
-        return importlib.import_module("Stacey.Stacey.staceyp2").Stacey_p2
-    except Exception:
-        return None
-
-
-Stacey_p2 = _import_stacey_p2()
+    Stacey_pp = None  # type: ignore[assignment]
 
 log = logging.getLogger(__name__)
 
@@ -84,7 +48,7 @@ NUM_THREADS: int = 4
 SKIP_KEYS: frozenset[str] = frozenset({"experiment_name", "tracking_uri", "seed"})
 REQUIRED_OPTIMIZER_NAMES: tuple[str, ...] = (
     "AdamW",
-    "Stacey_p2",
+    "Stacey_pp",
     "Lion",
     "AdamWScheduleFree",
     "GaLoreAdamW",
@@ -125,8 +89,8 @@ def _build_regression_params() -> dict:
             "weight_decay": tune.choice([0, 1e-5, 1e-4, 1e-3]),
             "correct_bias": tune.choice([False, True]),
         }
-    if Stacey_p2 is not None:
-        params[Stacey_p2] = {
+    if Stacey_pp is not None:
+        params[Stacey_pp] = {
             "lr_tau": tune.loguniform(1e-4, 1.0),
             "lr_eta": tune.loguniform(1e-4, 1.0),
             "lr_alpha": tune.loguniform(1e-4, 1.0),
@@ -173,8 +137,8 @@ def _build_classification_params() -> dict:
             "weight_decay": tune.choice([0, 1e-5, 1e-4, 1e-3]),
             "correct_bias": tune.choice([False, True]),
         }
-    if Stacey_p2 is not None:
-        params[Stacey_p2] = {
+    if Stacey_pp is not None:
+        params[Stacey_pp] = {
             "lr_tau": tune.loguniform(1e-4, 1.0),
             "lr_eta": tune.loguniform(1e-4, 1.0),
             "lr_alpha": tune.loguniform(1e-4, 1.0),

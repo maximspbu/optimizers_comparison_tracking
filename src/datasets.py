@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Tuple
@@ -30,7 +31,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder, OrdinalEncoder, StandardScaler
 from torch.utils.data import Dataset, Subset, TensorDataset
 
-from .downloader import download_zip_member, resolve_local_path
+from .downloader import download_kaggle_dataset, download_zip_member, resolve_local_path
 
 log = logging.getLogger(__name__)
 
@@ -288,6 +289,7 @@ _CLS_LOCAL_CSV_CANDIDATES: dict[str, list[str]] = {
     "creditcard": [
         "/kaggle/input/datasets/organizations/mlg-ulb/creditcardfraud/creditcard.csv",
         "/kaggle/input/creditcardfraud/creditcard.csv",
+        "/kaggle/input/creditcard-fraud-detection/creditcard.csv",
         "./creditcard.csv",
     ],
 }
@@ -298,6 +300,41 @@ _CLS_OPENML_IDS: dict[str, int] = {
     "helena": 41169,
     "adult": 1590,
 }
+
+_ADULT_COLUMNS: list[str] = [
+    "age",
+    "workclass",
+    "fnlwgt",
+    "education",
+    "education.num",
+    "marital.status",
+    "occupation",
+    "relationship",
+    "race",
+    "sex",
+    "capital.gain",
+    "capital.loss",
+    "hours.per.week",
+    "native.country",
+    "income",
+]
+
+_ADULT_UCI_URLS: dict[str, str] = {
+    "adult.data": "https://archive.ics.uci.edu/ml/machine-learning-databases/adult/adult.data",
+    "adult.test": "https://archive.ics.uci.edu/ml/machine-learning-databases/adult/adult.test",
+}
+
+
+def _download_file(url: str, dest_path: str, timeout: int = 120) -> str:
+    if os.path.exists(dest_path):
+        log.info("Cache hit: %s", dest_path)
+        return dest_path
+    Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
+    log.info("Downloading %s ...", url)
+    with urllib.request.urlopen(url, timeout=timeout) as src, open(dest_path, "wb") as dst:
+        dst.write(src.read())
+    log.info("Saved to %s", dest_path)
+    return dest_path
 
 
 def _fetch_cls_via_sklearn(data_id: int) -> tuple[np.ndarray, np.ndarray]:
@@ -338,53 +375,115 @@ def _load_cls_from_local_csv(name: str, data_dir: str) -> tuple[np.ndarray, np.n
     return X, y
 
 
+def _load_adult_from_uci(data_dir: str) -> tuple[np.ndarray, np.ndarray]:
+    adult_dir = Path(data_dir) / "adult_uci"
+    data_path = _download_file(_ADULT_UCI_URLS["adult.data"], str(adult_dir / "adult.data"))
+    test_path = _download_file(_ADULT_UCI_URLS["adult.test"], str(adult_dir / "adult.test"))
+
+    train = pd.read_csv(
+        data_path,
+        names=_ADULT_COLUMNS,
+        skipinitialspace=True,
+        na_values="?",
+    )
+    test = pd.read_csv(
+        test_path,
+        names=_ADULT_COLUMNS,
+        skipinitialspace=True,
+        na_values="?",
+        comment="|",
+    )
+    test["income"] = test["income"].astype(str).str.rstrip(".")
+    df = pd.concat([train, test], ignore_index=True)
+    X = _preprocess_X(df.drop(columns=["income"]))
+    y = pd.Categorical(df["income"]).codes.astype(np.int64)
+    return X, y
+
+
+def _load_creditcard_from_kaggle(data_dir: str, kaggle_json: str | None = None) -> tuple[np.ndarray, np.ndarray]:
+    dest_dir = Path(data_dir) / "creditcardfraud"
+    csv_path = dest_dir / "creditcard.csv"
+    if not csv_path.exists():
+        download_kaggle_dataset(
+            "mlg-ulb/creditcardfraud",
+            str(dest_dir),
+            kaggle_json=kaggle_json,
+        )
+    if not csv_path.exists():
+        raise FileNotFoundError(f"creditcard.csv not found after Kaggle download: {csv_path}")
+    log.info("Loaded creditcard from Kaggle CSV: %s", csv_path)
+    df = pd.read_csv(csv_path)
+    if "Class" not in df.columns:
+        raise ValueError(f"creditcard.csv must contain 'Class' target column; got {list(df.columns)}")
+    X = df.drop(columns=["Class"]).values.astype(np.float32)
+    y = df["Class"].astype(np.int64).values
+    return X, y
+
+
 def load_openml_tabular(
     name: str,
     seed: int = 42,
     data_dir: str = _DEFAULT_DATA_DIR,
     train_frac: float = 0.70,
     val_frac: float = 0.15,
+    kaggle_json: str | None = None,
 ) -> tuple[TensorDataset, TensorDataset, TensorDataset, int, int]:
-    """Load a tabular classification dataset via local CSV → sklearn → openml.
+    """Load a tabular classification dataset via verified local/direct sources.
 
     Returns:
         (train_ds, val_ds, test_ds, input_shape, num_classes)
     """
-    # 1. Local CSV
     try:
         X, y = _load_cls_from_local_csv(name, data_dir)
     except FileNotFoundError as e_local:
-        log.info("No local CSV (%s); trying OpenML.", e_local)
-        data_id = _CLS_OPENML_IDS.get(name)
-        if data_id is None:
-            raise ValueError(f"No OpenML data_id for '{name}'.") from e_local
+        log.info("No local CSV (%s); trying verified direct source.", e_local)
+        if name == "adult":
+            X, y = _load_adult_from_uci(data_dir)
+        elif name == "creditcard":
+            X, y = _load_creditcard_from_kaggle(data_dir, kaggle_json=kaggle_json)
+        else:
+            data_id = _CLS_OPENML_IDS.get(name)
+            if data_id is None:
+                raise ValueError(f"No verified loader or OpenML data_id for '{name}'.") from e_local
+            try:
+                X, y = _fetch_cls_via_sklearn(data_id)
+            except Exception as e_sk:
+                log.warning("sklearn failed (%s); trying openml pkg.", e_sk)
+                X, y = _fetch_cls_via_openml_pkg(data_id)
 
-        # 2. sklearn fetch_openml
-        try:
-            X, y = _fetch_cls_via_sklearn(data_id)
-        except Exception as e_sk:
-            log.warning("sklearn failed (%s); trying openml pkg.", e_sk)
-            # 3. openml package
-            X, y = _fetch_cls_via_openml_pkg(data_id)
-
-    rng = np.random.RandomState(seed)
-    idx = rng.permutation(len(X))
-    n_train = int(train_frac * len(X))
-    n_val = int(val_frac * len(X))
-    tr, va, te = idx[:n_train], idx[n_train : n_train + n_val], idx[n_train + n_val :]
+    test_frac = 1.0 - train_frac - val_frac
+    if test_frac <= 0:
+        raise ValueError(f"train_frac + val_frac must be < 1, got {train_frac + val_frac}")
+    stratify = y if len(np.unique(y)) > 1 else None
+    X_tv, X_test, y_tv, y_test = train_test_split(
+        X,
+        y,
+        test_size=test_frac,
+        random_state=seed,
+        stratify=stratify,
+    )
+    val_rel = val_frac / (train_frac + val_frac)
+    stratify_tv = y_tv if len(np.unique(y_tv)) > 1 else None
+    X_train_raw, X_val_raw, y_train, y_val = train_test_split(
+        X_tv,
+        y_tv,
+        test_size=val_rel,
+        random_state=seed,
+        stratify=stratify_tv,
+    )
 
     scaler = StandardScaler()
-    X_train = scaler.fit_transform(X[tr]).astype(np.float32)
-    X_val = scaler.transform(X[va]).astype(np.float32)
-    X_test = scaler.transform(X[te]).astype(np.float32)
+    X_train = scaler.fit_transform(X_train_raw).astype(np.float32)
+    X_val = scaler.transform(X_val_raw).astype(np.float32)
+    X_test = scaler.transform(X_test).astype(np.float32)
 
     def _ds(Xp: np.ndarray, yp: np.ndarray) -> TensorDataset:
         return TensorDataset(torch.tensor(Xp), torch.tensor(yp))
 
     return (
-        _ds(X_train, y[tr]),
-        _ds(X_val, y[va]),
-        _ds(X_test, y[te]),
+        _ds(X_train, y_train),
+        _ds(X_val, y_val),
+        _ds(X_test, y_test),
         X.shape[1],
         int(y.max()) + 1,
     )
@@ -458,6 +557,11 @@ _IMAGE_CONFIGS: dict[str, dict] = {
             "/kaggle/input/intel-image-classification/seg_test/seg_test",
             "/kaggle/input/intel-image-classification/seg_test",
         ],
+    },
+    "cifar100": {
+        "type": "torchvision",
+        "num_classes": 100,
+        "img_size": 224,
     },
 }
 
@@ -541,15 +645,42 @@ def load_image_dataset(
             num_classes,
         )
 
+    if name == "cifar100":
+        from torchvision.datasets import CIFAR100
+
+        Path(data_dir).mkdir(parents=True, exist_ok=True)
+        full_train = CIFAR100(root=data_dir, train=True, download=True, transform=None)
+        test_ds = CIFAR100(
+            root=data_dir,
+            train=False,
+            download=True,
+            transform=_get_image_transforms(img_size, augment=False),
+        )
+        n = len(full_train)
+        n_t = int((1 - val_frac) * n)
+        n_v = n - n_t
+        gen = torch.Generator().manual_seed(seed)
+        t_sub, v_sub = torch.utils.data.random_split(full_train, [n_t, n_v], generator=gen)
+        return (
+            _SubsetWithTransform(t_sub, _get_image_transforms(img_size, augment=True)),
+            _SubsetWithTransform(v_sub, _get_image_transforms(img_size, augment=False)),
+            test_ds,
+            num_classes,
+        )
+
     if name == "intel":
         from torchvision.datasets import ImageFolder
 
         # Build candidate paths including data_dir
         train_paths = cfg["train_paths"] + [
+            f"{data_dir}/seg_train/seg_train",
+            f"{data_dir}/seg_train",
             f"{data_dir}/intel-image-classification/seg_train/seg_train",
             f"{data_dir}/intel-image-classification/seg_train",
         ]
         test_paths = cfg["test_paths"] + [
+            f"{data_dir}/seg_test/seg_test",
+            f"{data_dir}/seg_test",
             f"{data_dir}/intel-image-classification/seg_test/seg_test",
             f"{data_dir}/intel-image-classification/seg_test",
         ]
@@ -649,13 +780,13 @@ _REGISTRY: dict[str, Callable[[int], DatasetTuple]] = {
 DATASETS_BY_TASK: dict[TaskType, tuple[str, ...]] = {
     "regression": ("superconductivity", "yearmsd", "california_housing", "diabetes"),
     "tabular_classification": ("adult", "creditcard", "higgs-small", "jannis", "helena"),
-    "image_classification": ("places365", "intel", "cifar10"),
+    "image_classification": ("cifar100", "intel", "places365", "cifar10"),
 }
 
 # Notebook-style dataset names per task (defaults for runner)
 REGRESSION_DATASETS: tuple[str, ...] = ("superconductivity", "yearmsd")
 TABULAR_CLS_DATASETS: tuple[str, ...] = ("adult", "creditcard")
-IMAGE_CLS_DATASETS: tuple[str, ...] = ("places365", "intel")
+IMAGE_CLS_DATASETS: tuple[str, ...] = ("cifar100", "intel")
 
 TRAIN_FRACTIONS: tuple[float, ...] = (0.1, 0.3, 0.5, 1.0)
 

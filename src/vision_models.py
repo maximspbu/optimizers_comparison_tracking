@@ -54,20 +54,25 @@ def _adapt_in_channels(conv: nn.Conv2d, in_channels: int) -> nn.Conv2d:
 
 
 def _build_resnet18(num_classes: int, in_channels: int) -> nn.Module:
-    from torchvision.models import resnet18
+    from torchvision.models import ResNet18_Weights, resnet18
 
-    model = resnet18(num_classes=num_classes)
+    weights = ResNet18_Weights.DEFAULT if in_channels == 3 else None
+    model = resnet18(weights=weights)
     model.conv1 = _adapt_in_channels(model.conv1, in_channels)
+    model.fc = nn.Linear(model.fc.in_features, num_classes)
     return model
 
 
 def _build_efficientnet_b0(num_classes: int, in_channels: int) -> nn.Module:
-    from torchvision.models import efficientnet_b0
+    from torchvision.models import EfficientNet_B0_Weights, efficientnet_b0
 
-    model = efficientnet_b0(num_classes=num_classes)
+    weights = EfficientNet_B0_Weights.DEFAULT if in_channels == 3 else None
+    model = efficientnet_b0(weights=weights)
     first_conv = model.features[0][0]
     if isinstance(first_conv, nn.Conv2d) and first_conv.in_channels != in_channels:
         model.features[0][0] = _adapt_in_channels(first_conv, in_channels)
+    in_features = model.classifier[1].in_features
+    model.classifier[1] = nn.Linear(in_features, num_classes)
     return model
 
 

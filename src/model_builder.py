@@ -165,6 +165,56 @@ class SimpleMLP(nn.Module):
         return self.net(x).squeeze(-1)
 
 
+class ResidualBlock(nn.Module):
+    def __init__(self, width: int, dropout: float = 0.15) -> None:
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.BatchNorm1d(width),
+            nn.Linear(width, width),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.BatchNorm1d(width),
+            nn.Linear(width, width),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.block(x)
+
+
+class ResidualMLP(nn.Module):
+    """Residual MLP for large tabular regression datasets."""
+
+    def __init__(
+        self,
+        in_features: int,
+        width: int = 256,
+        num_blocks: int = 4,
+        dropout: float = 0.15,
+    ) -> None:
+        super().__init__()
+        self.input = nn.Sequential(
+            nn.Linear(in_features, width),
+            nn.BatchNorm1d(width),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        self.blocks = nn.Sequential(*[ResidualBlock(width, dropout) for _ in range(num_blocks)])
+        self.head = nn.Sequential(
+            nn.BatchNorm1d(width),
+            nn.Linear(width, width // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(width // 2, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.input(x)
+        x = self.blocks(x)
+        return self.head(x).squeeze(-1)
+
+
 # ---------------------------------------------------------------------------
 # AttentionMLP for regression (feature-wise Transformer)
 # ---------------------------------------------------------------------------
@@ -274,6 +324,7 @@ class TabularAttentionModel(nn.Module):
 _TABULAR_BUILDERS = {
     **{k: k for k in MLP_DEPTHS},  # mlp_shallow, mlp_medium, mlp_deep
     "simple_mlp": "simple_mlp",
+    "residual_mlp": "residual_mlp",
     "attention_mlp": "attention_mlp",
     "simple_cls": "simple_cls",
     "attention_cls": "attention_cls",
@@ -298,6 +349,8 @@ def build_tabular_model(
         )
     if name == "simple_mlp":
         return SimpleMLP(in_features=input_shape)
+    if name == "residual_mlp":
+        return ResidualMLP(in_features=input_shape)
     if name == "attention_mlp":
         return AttentionMLP(in_features=input_shape)
     if name == "simple_cls":
