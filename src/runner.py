@@ -798,6 +798,30 @@ def _build_tuned_summary(
     return pd.DataFrame(rows).set_index("optimizer")
 
 
+def _build_default_comparison(tuned_summary: pd.DataFrame, default_summary: pd.DataFrame) -> pd.DataFrame:
+    """Join tuned/default summaries and add tuned-minus-default deltas."""
+    if tuned_summary.empty or default_summary.empty:
+        return pd.DataFrame()
+
+    common_cols = [c for c in tuned_summary.columns if c in default_summary.columns]
+    comparison = tuned_summary[common_cols].join(
+        default_summary[common_cols],
+        how="outer",
+        lsuffix="_tuned",
+        rsuffix="_default",
+    )
+
+    for col in common_cols:
+        tuned_col = f"{col}_tuned"
+        default_col = f"{col}_default"
+        tuned_vals = pd.to_numeric(comparison[tuned_col], errors="coerce")
+        default_vals = pd.to_numeric(comparison[default_col], errors="coerce")
+        if tuned_vals.notna().any() or default_vals.notna().any():
+            comparison[f"{col}_delta"] = tuned_vals - default_vals
+
+    return comparison
+
+
 def _build_comparison_df(
     task_type: str,
     analysis_results: dict,
@@ -1089,6 +1113,10 @@ def _run_experiment_pair(
     default_summary = _build_tuned_summary(default_seed_results, task_type, dataset_name=dataset_name)
     _save_df(default_summary, _result_path(cfg_obj.output_dir, exp_key, "default_summary.csv"))
 
+    default_comparison = _build_default_comparison(tuned_summary, default_summary)
+    if not default_comparison.empty:
+        _save_df(default_comparison, _result_path(cfg_obj.output_dir, exp_key, "tuned_vs_default.csv"))
+
     default_best = {
         opt_name: max(
             [r for r in runs if not np.isnan(r.get(primary_test_metric, float("nan")))],
@@ -1124,6 +1152,7 @@ def _run_experiment_pair(
         "tuned_seed_results": tuned_seed_results,
         "default_seed_results": default_seed_results,
         "comparison_df": comparison_df,
+        "default_comparison_df": default_comparison,
     }
 
 
