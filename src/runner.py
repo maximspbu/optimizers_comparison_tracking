@@ -191,7 +191,7 @@ class ExperimentConfig:
         if self.num_samples <= 0:
             self.num_samples = defaults.get("num_samples", 40)
         if self.mock_run:
-            self.num_samples = 4
+            self.num_samples = 2
             self.num_epochs = 2
             self.seeds = self.seeds[:1]
 
