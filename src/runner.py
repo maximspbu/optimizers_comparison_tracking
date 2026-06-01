@@ -80,8 +80,7 @@ def _configure_run_logging(output_dir: str) -> None:
     root.setLevel(logging.INFO)
 
     has_stream = any(
-        isinstance(handler, logging.StreamHandler)
-        and not isinstance(handler, logging.FileHandler)
+        isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler)
         for handler in root.handlers
     )
     if not has_stream:
@@ -91,8 +90,7 @@ def _configure_run_logging(output_dir: str) -> None:
         root.addHandler(stdout_handler)
 
     has_file = any(
-        getattr(handler, "_optimizer_runner_file", None) == str(log_path)
-        for handler in root.handlers
+        getattr(handler, "_optimizer_runner_file", None) == str(log_path) for handler in root.handlers
     )
     if not has_file:
         file_handler = logging.FileHandler(log_path, mode="a")
@@ -135,21 +133,21 @@ TASK_DEFAULTS: dict[str, dict] = {
         "model_types": ["simple_mlp", "residual_mlp"],
         "batch_size": 256,
         "num_epochs": 30,
-        "num_samples": 40,
+        "num_samples": 4,
     },
     "tabular_classification": {
         "datasets": list(TABULAR_CLS_DATASETS),
         "model_types": ["simple_cls", "attention_cls"],
         "batch_size": 1024,
         "num_epochs": 26,
-        "num_samples": 40,
+        "num_samples": 4,
     },
     "image_classification": {
         "datasets": list(IMAGE_CLS_DATASETS),
         "model_types": ["resnet18", "efficientnet_v2_s"],
         "batch_size": 64,
         "num_epochs": 12,
-        "num_samples": 16,
+        "num_samples": 3,
     },
 }
 
@@ -512,7 +510,9 @@ def _run_hpo(
                 class_weights = _class_weights_from_dataset(train_ds, _N_CLASSES)
                 if class_weights is not None:
                     loss_fn = _torch.nn.CrossEntropyLoss(weight=class_weights)
-            wrapper, tune_metrics = _make_wrapper(_TASK, model, _opt_cls, hparams, _N_CLASSES, loss_fn=loss_fn)
+            wrapper, tune_metrics = _make_wrapper(
+                _TASK, model, _opt_cls, hparams, _N_CLASSES, loss_fn=loss_fn
+            )
             tune_cb = TuneReportCallback(tune_metrics, on="validation_end")
             from pytorch_lightning.callbacks import EarlyStopping as _ES
 
@@ -1037,16 +1037,12 @@ def _run_experiment_pair(
     tuned_summary = _build_tuned_summary(tuned_seed_results, task_type, dataset_name=dataset_name)
     _save_df(tuned_summary, _result_path(cfg_obj.output_dir, exp_key, "tuned_summary.csv"))
 
-    primary_test_metric = "test_r2" if task_type == "regression" else _classification_primary_test_metric(dataset_name)
+    primary_test_metric = (
+        "test_r2" if task_type == "regression" else _classification_primary_test_metric(dataset_name)
+    )
     tuned_best = {
         opt_name: max(
-            [
-                r
-                for r in runs
-                if not np.isnan(
-                    r.get(primary_test_metric, float("nan"))
-                )
-            ],
+            [r for r in runs if not np.isnan(r.get(primary_test_metric, float("nan")))],
             key=lambda r: r.get(primary_test_metric, float("-inf")),
             default=runs[0] if runs else {},
         )
@@ -1078,13 +1074,7 @@ def _run_experiment_pair(
 
     default_best = {
         opt_name: max(
-            [
-                r
-                for r in runs
-                if not np.isnan(
-                    r.get(primary_test_metric, float("nan"))
-                )
-            ],
+            [r for r in runs if not np.isnan(r.get(primary_test_metric, float("nan")))],
             key=lambda r: r.get(primary_test_metric, float("-inf")),
             default=runs[0] if runs else {},
         )
