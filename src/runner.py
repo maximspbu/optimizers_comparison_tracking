@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import statistics
+import sys
 import time
 import warnings
 from dataclasses import dataclass, field
@@ -67,6 +68,50 @@ from .vision_models import build_vision_model, list_vision_models
 log = logging.getLogger(__name__)
 
 sns.set_style("whitegrid")
+
+
+def _configure_run_logging(output_dir: str) -> None:
+    """Ensure runner logs go both to stdout and a stable file."""
+    log_dir = Path(output_dir, "results")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "run.log"
+    fmt = logging.Formatter("%(asctime)s  %(levelname)-8s  %(name)s  %(message)s")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+
+    has_stream = any(
+        isinstance(handler, logging.StreamHandler)
+        and not isinstance(handler, logging.FileHandler)
+        for handler in root.handlers
+    )
+    if not has_stream:
+        stdout_handler = logging.StreamHandler(sys.stdout)
+        stdout_handler.setFormatter(fmt)
+        stdout_handler.setLevel(logging.INFO)
+        root.addHandler(stdout_handler)
+
+    has_file = any(
+        getattr(handler, "_optimizer_runner_file", None) == str(log_path)
+        for handler in root.handlers
+    )
+    if not has_file:
+        file_handler = logging.FileHandler(log_path, mode="a")
+        file_handler.setFormatter(fmt)
+        file_handler.setLevel(logging.INFO)
+        file_handler._optimizer_runner_file = str(log_path)
+        root.addHandler(file_handler)
+
+
+def _is_interactive_environment() -> bool:
+    return hasattr(sys, "ps1") or "ipykernel" in sys.modules or "IPython" in sys.modules
+
+
+def _lightning_strategy(gpu_num: int) -> str:
+    if gpu_num <= 1:
+        return "auto"
+    if _is_interactive_environment():
+        return "ddp_notebook"
+    return "ddp"
 
 
 def _make_reporter(frequency: int = 30) -> Any:
@@ -653,7 +698,7 @@ def _run_evaluation(
                     max_time={"hours": 2} if task_type == "image_classification" else None,
                     accelerator="auto",
                     devices=max(1, cfg_obj.gpu_num),
-                    strategy="ddp" if cfg_obj.gpu_num > 1 else "auto",
+                    strategy=_lightning_strategy(cfg_obj.gpu_num),
                     precision="16-mixed" if task_type != "regression" else "32-true",
                     enable_progress_bar=False,
                     enable_checkpointing=False,
@@ -1086,6 +1131,8 @@ def run_experiments(cfg_obj: ExperimentConfig) -> dict:
 
     # Initialise output directories
     _makedirs(cfg_obj.output_dir)
+    _configure_run_logging(cfg_obj.output_dir)
+    log.info("Logging to %s", Path(cfg_obj.output_dir, "results", "run.log"))
 
     # Initialise Ray + MLflow
     cfg.setup(working_dir=".", seed=cfg_obj.seeds[0], n_gpus=cfg_obj.gpu_num)
