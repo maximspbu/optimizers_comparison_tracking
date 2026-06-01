@@ -1,0 +1,36 @@
+# Server notebook requirements for Python 3.14 GPU images.
+# Keep the image-provided CUDA-compatible torch build; run_on_server.ipynb
+# installs the scientific stack separately from binary wheels.
+
+# PyTorch ecosystem, excluding torch/torchvision/torchaudio.
+torchmetrics
+pytorch-lightning
+lightning-utilities
+
+# Optimizers
+lion-pytorch==0.2.4
+torch-optimizer==0.3.0
+schedulefree
+galore-torch
+adabelief-pytorch
+adabound
+
+# Experiment tracking & HPO
+mlflow
+ray[tune]>=2.55.0
+optuna
+psutil
+pynvml
+
+# Dataset downloading
+openml
+kaggle
+
+# MLflow UI tunnel
+pyngrok
+
+# Utilities
+torchinfo
+tqdm
+protobuf
+tensorboard
