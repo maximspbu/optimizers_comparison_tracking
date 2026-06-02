@@ -181,6 +181,8 @@ class ExperimentConfig:
     data_dir: str = "./data"
     num_workers: int = 4
     kaggle_json: str | None = None
+    grid_check: bool = False
+    grid_check_max_imgs: int = 256
 
     def __post_init__(self) -> None:
         defaults = TASK_DEFAULTS.get(self.task_type, {})
@@ -194,7 +196,13 @@ class ExperimentConfig:
             self.num_epochs = defaults.get("num_epochs", 30)
         if self.num_samples <= 0:
             self.num_samples = defaults.get("num_samples", 40)
-        if self.mock_run:
+        if self.grid_check:
+            self.mock_run = True
+            self.num_samples = max(1, self.num_samples)
+            self.num_epochs = max(1, self.num_epochs)
+            self.seeds = self.seeds[:1]
+            self.mock_max_imgs = max(12, self.grid_check_max_imgs)
+        elif self.mock_run:
             self.num_samples = 2
             self.num_epochs = 2
             self.seeds = self.seeds[:1]
@@ -852,6 +860,88 @@ def _build_comparison_df(
     return pd.DataFrame(rows)
 
 
+def _build_grid_check_tables(
+    task_type: str,
+    dataset_name: str,
+    analysis_results: dict,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build compact trial-level diagnostics for fast image-grid checks."""
+    metric, mode = _hpo_metric(task_type, dataset_name)
+    rows: list[dict] = []
+    for opt_cls, result_grid in analysis_results.items():
+        opt_name = opt_cls.__name__
+        for idx in range(len(result_grid)):
+            result = result_grid[idx]
+            cfg_values = result.config or {}
+            metrics = result.metrics or {}
+            row: dict[str, Any] = {
+                "optimizer": opt_name,
+                "status": getattr(result, "status", None),
+                "error": bool(getattr(result, "error", None)),
+                "training_iteration": metrics.get("training_iteration", float("nan")),
+                "time_total_s": metrics.get("time_total_s", float("nan")),
+                metric: metrics.get(metric, float("nan")),
+                "val_loss": metrics.get("val_loss", float("nan")),
+                "val_accuracy": metrics.get("val_accuracy", float("nan")),
+                "val_f1score": metrics.get("val_f1score", float("nan")),
+                "val_precision": metrics.get("val_precision", float("nan")),
+                "val_recall": metrics.get("val_recall", float("nan")),
+            }
+            for key, value in cfg_values.items():
+                if key not in cfg.SKIP_KEYS:
+                    row[key] = value
+            rows.append(row)
+
+    trials_df = pd.DataFrame(rows)
+    if trials_df.empty:
+        return trials_df, pd.DataFrame()
+
+    metric_values = pd.to_numeric(trials_df[metric], errors="coerce")
+    trials_df[metric] = metric_values
+    ascending = mode == "min"
+    trials_df = trials_df.sort_values(["optimizer", metric], ascending=[True, ascending])
+
+    summary_rows: list[dict] = []
+    for opt_name, group in trials_df.groupby("optimizer", sort=False):
+        vals = pd.to_numeric(group[metric], errors="coerce").dropna()
+        val_loss = pd.to_numeric(group["val_loss"], errors="coerce").dropna()
+        summary_rows.append(
+            {
+                "optimizer": opt_name,
+                "trials": int(len(group)),
+                "valid_trials": int(vals.count()),
+                "failed_trials": int(group["error"].sum()),
+                f"best_{metric}": vals.min() if ascending and not vals.empty else vals.max() if not vals.empty else float("nan"),
+                f"median_{metric}": vals.median() if not vals.empty else float("nan"),
+                f"worst_{metric}": vals.max() if ascending and not vals.empty else vals.min() if not vals.empty else float("nan"),
+                "metric_spread": (vals.max() - vals.min()) if len(vals) > 1 else float("nan"),
+                "median_val_loss": val_loss.median() if not val_loss.empty else float("nan"),
+                "median_time_total_s": pd.to_numeric(group["time_total_s"], errors="coerce").median(),
+            }
+        )
+
+    summary_df = pd.DataFrame(summary_rows).sort_values(f"best_{metric}", ascending=ascending)
+    return trials_df, summary_df
+
+
+def _save_grid_check_report(
+    task_type: str,
+    dataset_name: str,
+    analysis_results: dict,
+    output_dir: str,
+    exp_key: str,
+) -> dict[str, pd.DataFrame]:
+    trials_df, summary_df = _build_grid_check_tables(task_type, dataset_name, analysis_results)
+    trials_path = _result_path(output_dir, exp_key, "grid_check_trials.csv")
+    summary_path = _result_path(output_dir, exp_key, "grid_check_summary.csv")
+    _save_df(trials_df, trials_path)
+    _save_df(summary_df, summary_path)
+    if not summary_df.empty:
+        log.info("Grid-check summary for %s:\n%s", exp_key, summary_df.to_string(index=False))
+    log.info("Grid-check tables saved: %s, %s", trials_path, summary_path)
+    return {"grid_check_trials": trials_df, "grid_check_summary": summary_df}
+
+
 # ---------------------------------------------------------------------------
 # Plotting helpers
 # ---------------------------------------------------------------------------
@@ -1031,6 +1121,23 @@ def _run_experiment_pair(
         max_concurrent,
     )
 
+    if cfg_obj.grid_check:
+        log.info("--- Grid-check mode: saving HPO diagnostics and skipping final evaluations ---")
+        grid_check_tables = _save_grid_check_report(
+            task_type,
+            dataset_name,
+            analysis_results,
+            cfg_obj.output_dir,
+            exp_key,
+        )
+        comparison_df = _build_comparison_df(task_type, analysis_results, dataset_name=dataset_name)
+        _save_df(comparison_df, _result_path(cfg_obj.output_dir, exp_key, "comparison.csv"))
+        return {
+            "analysis_results": analysis_results,
+            "comparison_df": comparison_df,
+            **grid_check_tables,
+        }
+
     # 3. Comparison DataFrame
     comparison_df = _build_comparison_df(task_type, analysis_results, dataset_name=dataset_name)
     _save_df(comparison_df, _result_path(cfg_obj.output_dir, exp_key, "comparison.csv"))
@@ -1165,6 +1272,9 @@ def run_experiments(cfg_obj: ExperimentConfig) -> dict:
     """Run the full 6-step experiment loop for all (dataset, model_type) pairs."""
     warnings.filterwarnings("ignore")
 
+    if cfg_obj.grid_check and cfg_obj.task_type != "image_classification":
+        raise ValueError("grid_check mode is supported only for image_classification")
+
     # Initialise output directories
     _makedirs(cfg_obj.output_dir)
     _configure_run_logging(cfg_obj.output_dir)
@@ -1217,7 +1327,7 @@ def run_experiments(cfg_obj: ExperimentConfig) -> dict:
     # Cross-experiment summary
     from .stats import cross_experiment_summary
 
-    if all_results:
+    if all_results and not cfg_obj.grid_check:
         all_tuned = {k: v["tuned_seed_results"] for k, v in all_results.items()}
         cross_df = cross_experiment_summary(all_tuned, task_type)
         if not cross_df.empty:
