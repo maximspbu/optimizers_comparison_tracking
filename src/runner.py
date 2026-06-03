@@ -116,6 +116,12 @@ def _lightning_devices(gpu_num: int) -> int:
     return max(1, gpu_num)
 
 
+def _lightning_precision(task_type: str) -> str:
+    if task_type != "regression" and torch.cuda.is_available():
+        return "16-mixed"
+    return "32-true"
+
+
 def _make_reporter(frequency: int = 30) -> Any:
     """Return JupyterNotebookReporter in notebooks, CLIReporter otherwise."""
     try:
@@ -558,7 +564,7 @@ def _run_hpo(
                 max_time={"hours": 1} if _TASK == "image_classification" else None,
                 accelerator="auto",
                 devices=1,
-                precision="16-mixed" if _TASK != "regression" else "32-true",
+                precision=_lightning_precision(_TASK),
                 enable_progress_bar=False,
                 enable_checkpointing=False,
                 enable_model_summary=False,
@@ -642,6 +648,113 @@ def _run_hpo(
 # ---------------------------------------------------------------------------
 
 
+@ray.remote
+def _evaluate_single_seed_remote(
+    task_type: str,
+    dataset_name: str,
+    model_type: str,
+    cfg_obj: ExperimentConfig,
+    train_ds,
+    val_ds,
+    test_ds,
+    n_features: int,
+    n_classes: int,
+    optimizer_class,
+    hparams: dict,
+    exp_name: str,
+    exp_key: str,
+    seed: int,
+) -> tuple[dict, dict]:
+    """Train one final evaluation config on one Ray-assigned device."""
+    mlflow.set_tracking_uri(cfg_obj.mlflow_uri)
+    exp_id = cfg.get_or_create_experiment(exp_name)
+    mlflow.set_experiment(experiment_id=exp_id)
+
+    n_workers = cfg_obj.num_workers if task_type == "image_classification" else 0
+    dl_kw = dict(
+        batch_size=cfg_obj.batch_size,
+        num_workers=n_workers,
+        pin_memory=True,
+        persistent_workers=n_workers > 0,
+    )
+    train_dl = DataLoader(train_ds, shuffle=True, **dl_kw)
+    val_dl = DataLoader(val_ds, shuffle=False, **dl_kw)
+    test_dl = DataLoader(test_ds, shuffle=False, **dl_kw)
+
+    opt_name = optimizer_class.__name__
+    pl.seed_everything(seed, workers=True)
+    with mlflow.start_run(run_name=f"{exp_name}_{opt_name}_seed_{seed}"):
+        mlflow.log_param("seed", seed)
+        mlflow.log_param("optimizer", opt_name)
+        mlflow.log_param("model_type", model_type)
+        mlflow.log_param("dataset", dataset_name)
+
+        model = _build_model(task_type, model_type, n_features, n_classes)
+        loss_fn = None
+        if task_type == "tabular_classification" and dataset_name == "creditcard":
+            class_weights = _class_weights_from_dataset(train_ds, n_classes)
+            if class_weights is not None:
+                loss_fn = nn.CrossEntropyLoss(weight=class_weights)
+        wrapper, _ = _make_wrapper(
+            task_type,
+            model,
+            optimizer_class,
+            hparams,
+            n_classes,
+            loss_fn=loss_fn,
+        )
+        mlflow.pytorch.autolog(log_every_n_step=0)
+        sys_mon = SystemMonitorCallback()
+        sfcb = ScheduleFreeOptimizerCallback()
+        es = EarlyStopping(
+            monitor="val_loss",
+            patience=_ES_PATIENCE.get(task_type, 15),
+            mode="min",
+            min_delta=1e-4,
+            check_on_train_epoch_end=False,
+        )
+        tb_logger = TensorBoardLogger(
+            save_dir=str(Path(cfg_obj.output_dir) / "tensorboard"),
+            name=exp_key,
+            version=f"{opt_name}_seed{seed}",
+        )
+        trainer = pl.Trainer(
+            callbacks=[sfcb, sys_mon, es],
+            logger=tb_logger,
+            max_epochs=cfg_obj.num_epochs,
+            max_time={"hours": 2} if task_type == "image_classification" else None,
+            accelerator="auto",
+            devices=1,
+            strategy="auto",
+            precision=_lightning_precision(task_type),
+            enable_progress_bar=False,
+            enable_checkpointing=False,
+            enable_model_summary=False,
+        )
+        test_keys = _test_metric_keys(task_type)
+        try:
+            start = time.perf_counter()
+            trainer.fit(wrapper, train_dl, val_dl)
+            elapsed = time.perf_counter() - start
+            m = trainer.test(wrapper, test_dl)[0]
+            ms = {k: m.get(k, float("nan")) for k in test_keys}
+            ms["time_training"] = elapsed
+        except (AssertionError, RuntimeError) as e:
+            if any(k in str(e).lower() for k in ("grad", "c_tmp", "nan")):
+                log.warning("NaN instability: %s seed=%d", opt_name, seed)
+                ms = {k: float("nan") for k in test_keys}
+                ms["time_training"] = float("inf")
+            else:
+                raise
+
+        mon = sys_mon.summary()
+        ms.update(mon)
+        ms["seed"] = seed
+        mlflow.log_metrics({k: v for k, v in ms.items() if isinstance(v, (int, float))})
+
+    return ms, mon
+
+
 def _run_evaluation(
     task_type: str,
     dataset_name: str,
@@ -656,107 +769,66 @@ def _run_evaluation(
     exp_name: str,
     telemetry_logger: TelemetryLogger,
     exp_key: str,
+    gpu_per_trial: float,
+    cpu_per_trial: float,
+    max_concurrent: int,
 ) -> dict[str, list[dict]]:
     """Run multi-seed training for each optimizer and return {opt_name: [seed_result, ...]}."""
     mlflow.set_tracking_uri(cfg_obj.mlflow_uri)
     exp_id = cfg.get_or_create_experiment(exp_name)
     mlflow.set_experiment(experiment_id=exp_id)
 
-    hidden = max(64, n_features) if n_features > 0 else 64
-    dl_kw = dict(
-        batch_size=cfg_obj.batch_size,
-        num_workers=cfg_obj.num_workers,
-        pin_memory=True,
-        persistent_workers=cfg_obj.num_workers > 0,
-    )
-    train_dl = DataLoader(train_ds, shuffle=True, **dl_kw)
-    val_dl = DataLoader(val_ds, shuffle=False, **dl_kw)
-    test_dl = DataLoader(test_ds, shuffle=False, **dl_kw)
-
     seed_results: dict[str, list[dict]] = {}
+    jobs: list[tuple[Any, str, int]] = []
+
+    train_ref = ray.put(train_ds)
+    val_ref = ray.put(val_ds)
+    test_ref = ray.put(test_ds)
 
     for optimizer_class, hparams in optimizers_with_configs:
         opt_name = optimizer_class.__name__
         seed_results[opt_name] = []
-
         for seed in cfg_obj.seeds:
-            pl.seed_everything(seed, workers=True)
-            with mlflow.start_run(run_name=f"{exp_name}_{opt_name}_seed_{seed}"):
-                mlflow.log_param("seed", seed)
-                mlflow.log_param("optimizer", opt_name)
-                mlflow.log_param("model_type", model_type)
-                mlflow.log_param("dataset", dataset_name)
-
-                model = _build_model(task_type, model_type, n_features, n_classes)
-                loss_fn = None
-                if task_type == "tabular_classification" and dataset_name == "creditcard":
-                    class_weights = _class_weights_from_dataset(train_ds, n_classes)
-                    if class_weights is not None:
-                        loss_fn = nn.CrossEntropyLoss(weight=class_weights)
-                wrapper, _ = _make_wrapper(
-                    task_type,
-                    model,
-                    optimizer_class,
-                    hparams,
-                    n_classes,
-                    loss_fn=loss_fn,
-                )
-                mlflow.pytorch.autolog(log_every_n_step=0)
-                sys_mon = SystemMonitorCallback()
-                sfcb = ScheduleFreeOptimizerCallback()
-                es = EarlyStopping(
-                    monitor="val_loss",
-                    patience=_ES_PATIENCE.get(task_type, 15),
-                    mode="min",
-                    min_delta=1e-4,
-                    check_on_train_epoch_end=False,
-                )
-                tb_logger = TensorBoardLogger(
-                    save_dir=str(Path(cfg_obj.output_dir) / "tensorboard"),
-                    name=exp_key,
-                    version=f"{opt_name}_seed{seed}",
-                )
-                trainer = pl.Trainer(
-                    callbacks=[sfcb, sys_mon, es],
-                    logger=tb_logger,
-                    max_epochs=cfg_obj.num_epochs,
-                    max_time={"hours": 2} if task_type == "image_classification" else None,
-                    accelerator="auto",
-                    devices=_lightning_devices(cfg_obj.gpu_num),
-                    strategy=_lightning_strategy(cfg_obj.gpu_num),
-                    precision="16-mixed" if task_type != "regression" else "32-true",
-                    enable_progress_bar=False,
-                    enable_checkpointing=False,
-                    enable_model_summary=False,
-                )
-                test_keys = _test_metric_keys(task_type)
-                try:
-                    start = time.perf_counter()
-                    trainer.fit(wrapper, train_dl, val_dl)
-                    elapsed = time.perf_counter() - start
-                    m = trainer.test(wrapper, test_dl)[0]
-                    ms = {k: m.get(k, float("nan")) for k in test_keys}
-                    ms["time_training"] = elapsed
-                except (AssertionError, RuntimeError) as e:
-                    if any(k in str(e).lower() for k in ("grad", "c_tmp", "nan")):
-                        log.warning("NaN instability: %s seed=%d", opt_name, seed)
-                        ms = {k: float("nan") for k in test_keys}
-                        ms["time_training"] = float("inf")
-                    else:
-                        raise
-                mon = sys_mon.summary()
-                ms.update(mon)
-                ms["seed"] = seed
-                mlflow.log_metrics({k: v for k, v in ms.items() if isinstance(v, (int, float))})
-                telemetry_logger.log_summary(exp_key, opt_name, seed, mon)
-
-            log.info(
-                "  %s seed=%d  %s",
-                opt_name,
+            job = _evaluate_single_seed_remote.options(
+                num_cpus=cpu_per_trial,
+                num_gpus=gpu_per_trial,
+            ).remote(
+                task_type,
+                dataset_name,
+                model_type,
+                cfg_obj,
+                train_ref,
+                val_ref,
+                test_ref,
+                n_features,
+                n_classes,
+                optimizer_class,
+                hparams,
+                exp_name,
+                exp_key,
                 seed,
-                "  ".join(f"{k}={v:.4f}" for k, v in ms.items() if k in test_keys and isinstance(v, float)),
             )
-            seed_results[opt_name].append(ms)
+            jobs.append((job, opt_name, seed))
+
+    log.info(
+        "Evaluation scheduled  jobs=%d  gpu/trial=%.2f  cpu/trial=%.1f  max_concurrent=%d",
+        len(jobs),
+        gpu_per_trial,
+        cpu_per_trial,
+        max_concurrent,
+    )
+
+    for job, opt_name, seed in jobs:
+        ms, mon = ray.get(job)
+        telemetry_logger.log_summary(exp_key, opt_name, seed, mon)
+        test_keys = _test_metric_keys(task_type)
+        log.info(
+            "  %s seed=%d  %s",
+            opt_name,
+            seed,
+            "  ".join(f"{k}={v:.4f}" for k, v in ms.items() if k in test_keys and isinstance(v, float)),
+        )
+        seed_results[opt_name].append(ms)
 
     return seed_results
 
@@ -1181,6 +1253,9 @@ def _run_experiment_pair(
         tuned_exp,
         telemetry_logger,
         exp_key,
+        gpu_per_trial,
+        cpu_per_trial,
+        max_concurrent,
     )
     tuned_summary = _build_tuned_summary(tuned_seed_results, task_type, dataset_name=dataset_name)
     _save_df(tuned_summary, _result_path(cfg_obj.output_dir, exp_key, "tuned_summary.csv"))
@@ -1216,6 +1291,9 @@ def _run_experiment_pair(
         default_exp,
         telemetry_logger,
         exp_key,
+        gpu_per_trial,
+        cpu_per_trial,
+        max_concurrent,
     )
     default_summary = _build_tuned_summary(default_seed_results, task_type, dataset_name=dataset_name)
     _save_df(default_summary, _result_path(cfg_obj.output_dir, exp_key, "default_summary.csv"))
