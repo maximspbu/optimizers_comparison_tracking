@@ -1072,17 +1072,18 @@ def _save_resource_bars(
             "avg_cpu_pct": v.get("avg_cpu_pct", 0),
             "avg_ram_gb": v.get("avg_ram_gb", 0),
             "avg_gpu_gb": v.get("avg_gpu_gb", 0),
+            "avg_gpu_util_pct": v.get("avg_gpu_util_pct", 0),
         }
         for k, v in results.items()
     ]
     if not rows:
         return
     df = pd.DataFrame(rows)
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+    fig, axes = plt.subplots(1, 4, figsize=(18, 4))
     for ax, col, label in zip(
         axes,
-        ["avg_cpu_pct", "avg_ram_gb", "avg_gpu_gb"],
-        ["CPU %", "RAM GB", "GPU Memory GB"],
+        ["avg_cpu_pct", "avg_ram_gb", "avg_gpu_gb", "avg_gpu_util_pct"],
+        ["CPU %", "RAM GB", "GPU Memory GB", "GPU Util %"],
     ):
         sns.barplot(data=df, x="optimizer", y=col, ax=ax)
         ax.set_title(f"{label}  {title_suffix}")
