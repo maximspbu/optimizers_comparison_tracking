@@ -299,6 +299,7 @@ _CLS_OPENML_IDS: dict[str, int] = {
     "jannis": 41168,
     "helena": 41169,
     "adult": 1590,
+    "creditcard": 42397,
 }
 
 _ADULT_COLUMNS: list[str] = [
@@ -420,6 +421,16 @@ def _load_creditcard_from_kaggle(data_dir: str, kaggle_json: str | None = None) 
     return X, y
 
 
+def _load_creditcard_from_openml() -> tuple[np.ndarray, np.ndarray]:
+    data_id = _CLS_OPENML_IDS["creditcard"]
+    try:
+        X, y = _fetch_cls_via_sklearn(data_id)
+    except Exception as e_sk:
+        log.warning("sklearn OpenML creditcard fetch failed (%s); trying openml pkg.", e_sk)
+        X, y = _fetch_cls_via_openml_pkg(data_id)
+    return X.astype(np.float32), y.astype(np.int64)
+
+
 def load_openml_tabular(
     name: str,
     seed: int = 42,
@@ -440,7 +451,15 @@ def load_openml_tabular(
         if name == "adult":
             X, y = _load_adult_from_uci(data_dir)
         elif name == "creditcard":
-            X, y = _load_creditcard_from_kaggle(data_dir, kaggle_json=kaggle_json)
+            try:
+                X, y = _load_creditcard_from_kaggle(data_dir, kaggle_json=kaggle_json)
+            except Exception as e_kg:
+                log.warning(
+                    "Kaggle creditcard download failed (%s); trying OpenML data_id=%s.",
+                    e_kg,
+                    _CLS_OPENML_IDS["creditcard"],
+                )
+                X, y = _load_creditcard_from_openml()
         else:
             data_id = _CLS_OPENML_IDS.get(name)
             if data_id is None:

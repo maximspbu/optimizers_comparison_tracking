@@ -1034,17 +1034,46 @@ def _save_metric_curves(
             best = result_grid.get_best_result(metric=metric_name, mode=mode)
             if best is None:
                 continue
-            # Try per-epoch curve from metrics_dataframe
+            # Try per-epoch curve from metrics_dataframe. Some Ray/ASHA trials
+            # report only one validation point; markers keep those visible.
             mdf = best.metrics_dataframe
             if mdf is not None and metric_name in mdf.columns:
-                ax.plot(
-                    mdf[metric_name].values,
-                    label=f"{opt_cls.__name__} (final={mdf[metric_name].iloc[-1]:.4f})",
-                )
+                series = pd.to_numeric(mdf[metric_name], errors="coerce").dropna()
+                if series.empty:
+                    val = (best.metrics or {}).get(metric_name, float("nan"))
+                    ax.plot(
+                        [0],
+                        [val],
+                        marker="o",
+                        linestyle="None",
+                        label=f"{opt_cls.__name__} (final={val:.4f})",
+                    )
+                else:
+                    x = series.index.to_numpy()
+                    if "training_iteration" in mdf.columns:
+                        x = pd.to_numeric(
+                            mdf.loc[series.index, "training_iteration"],
+                            errors="coerce",
+                        ).to_numpy()
+                    if np.isnan(x).any():
+                        x = np.arange(len(series))
+                    ax.plot(
+                        x,
+                        series.to_numpy(),
+                        marker="o",
+                        label=f"{opt_cls.__name__} (final={series.iloc[-1]:.4f})",
+                    )
             else:
-                # Fallback: single final-value horizontal line
+                # Fallback: single final-value marker
                 val = (best.metrics or {}).get(metric_name, float("nan"))
-                ax.axhline(val, linestyle="--", label=f"{opt_cls.__name__} (final={val:.4f})", alpha=0.8)
+                ax.plot(
+                    [0],
+                    [val],
+                    marker="o",
+                    linestyle="None",
+                    label=f"{opt_cls.__name__} (final={val:.4f})",
+                    alpha=0.8,
+                )
             plotted = True
         except Exception as e:
             log.debug("Could not plot %s for %s: %s", metric_name, opt_cls.__name__, e)
