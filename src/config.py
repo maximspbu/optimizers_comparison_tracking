@@ -46,6 +46,21 @@ SEED: int = 0
 SEEDS: tuple[int, ...] = (0, 1, 2, 3, 4)
 NUM_THREADS: int = 4
 SKIP_KEYS: frozenset[str] = frozenset({"experiment_name", "tracking_uri", "seed"})
+RAY_RUNTIME_ENV_EXCLUDES: tuple[str, ...] = (
+    "/.DS_Store",
+    "/.ipynb_checkpoints/",
+    "/.jupyter/",
+    "/.jupyter_ystore.db",
+    "/.ruff_cache/",
+    "/.venv/",
+    "/analyzes/",
+    "/data/",
+    "/mlruns/",
+    "/outputs/",
+    "/review/",
+    "*.bak",
+    "*.tmp",
+)
 REQUIRED_OPTIMIZER_NAMES: tuple[str, ...] = (
     "AdamW",
     "Stacey_pp",
@@ -295,7 +310,11 @@ def setup(
     ray_cpus = n_cpus if n_cpus is not None else (os.cpu_count() or 4)
     ray.shutdown()
     ray.init(
-        runtime_env={"env_vars": _SILENT_ENV, "working_dir": working_dir},
+        runtime_env={
+            "env_vars": _SILENT_ENV,
+            "working_dir": working_dir,
+            "excludes": list(RAY_RUNTIME_ENV_EXCLUDES),
+        },
         logging_level=logging.ERROR,
         log_to_driver=False,
         num_cpus=ray_cpus,
