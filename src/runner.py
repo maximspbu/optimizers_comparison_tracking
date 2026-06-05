@@ -189,6 +189,8 @@ class ExperimentConfig:
     kaggle_json: str | None = None
     grid_check: bool = False
     grid_check_max_imgs: int = 256
+    resume_from_dataset: str | None = None
+    resume_from_model: str | None = None
 
     def __post_init__(self) -> None:
         defaults = TASK_DEFAULTS.get(self.task_type, {})
@@ -213,6 +215,8 @@ class ExperimentConfig:
             self.num_epochs = 2
             self.seeds = self.seeds[:1]
         self.mlflow_uri = _normalize_mlflow_uri(self.mlflow_uri)
+        if (self.resume_from_dataset is None) ^ (self.resume_from_model is None):
+            raise ValueError("resume_from_dataset and resume_from_model must be set together.")
 
 
 # ---------------------------------------------------------------------------
@@ -436,6 +440,35 @@ def _test_metric_keys(task_type: str) -> list[str]:
 
 def _classification_primary_test_metric(dataset_name: str | None = None) -> str:
     return "test_f1score" if dataset_name == "creditcard" else "test_accuracy"
+
+
+def _evaluation_resources(
+    task_type: str,
+    model_type: str,
+    cfg_obj: ExperimentConfig,
+    hpo_gpu_per_trial: float,
+    hpo_cpu_per_trial: float,
+    hpo_max_concurrent: int,
+) -> tuple[float, float, int]:
+    """Return safer resources for final multi-seed evaluation.
+
+    HPO uses fractional GPUs aggressively to keep search throughput high.
+    Final image-model evaluation logs more artifacts and runs every seed to
+    completion, so sharing a GPU between large backbones can OOM on 12 GB GPUs.
+    """
+    if task_type != "image_classification" or hpo_gpu_per_trial <= 0:
+        return hpo_gpu_per_trial, hpo_cpu_per_trial, hpo_max_concurrent
+
+    total_cpus = os.cpu_count() or 4
+    detected_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    usable_gpus = min(max(0, cfg_obj.gpu_num), detected_gpus)
+    if usable_gpus <= 0:
+        return 0.0, max(2.0, float(total_cpus) / 4), 4
+
+    gpu_per_trial = 1.0
+    max_concurrent = max(1, usable_gpus)
+    cpu_per_trial = max(1.0, float(total_cpus) / max_concurrent)
+    return gpu_per_trial, cpu_per_trial, max_concurrent
 
 
 # ---------------------------------------------------------------------------
@@ -740,7 +773,14 @@ def _evaluate_single_seed_remote(
             ms = {k: m.get(k, float("nan")) for k in test_keys}
             ms["time_training"] = elapsed
         except (AssertionError, RuntimeError) as e:
-            if any(k in str(e).lower() for k in ("grad", "c_tmp", "nan")):
+            err = str(e).lower()
+            if "out of memory" in err:
+                log.warning("CUDA OOM: %s seed=%d (%s)", opt_name, seed, e)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                ms = {k: float("nan") for k in test_keys}
+                ms["time_training"] = float("inf")
+            elif any(k in err for k in ("grad", "c_tmp", "nan")):
                 log.warning("NaN instability: %s seed=%d", opt_name, seed)
                 ms = {k: float("nan") for k in test_keys}
                 ms["time_training"] = float("inf")
@@ -779,7 +819,7 @@ def _run_evaluation(
     mlflow.set_experiment(experiment_id=exp_id)
 
     seed_results: dict[str, list[dict]] = {}
-    jobs: list[tuple[Any, str, int]] = []
+    pending_specs: list[tuple[Any, dict]] = []
 
     train_ref = ray.put(train_ds)
     val_ref = ray.put(val_ds)
@@ -789,36 +829,59 @@ def _run_evaluation(
         opt_name = optimizer_class.__name__
         seed_results[opt_name] = []
         for seed in cfg_obj.seeds:
-            job = _evaluate_single_seed_remote.options(
-                num_cpus=cpu_per_trial,
-                num_gpus=gpu_per_trial,
-            ).remote(
-                task_type,
-                dataset_name,
-                model_type,
-                cfg_obj,
-                train_ref,
-                val_ref,
-                test_ref,
-                n_features,
-                n_classes,
-                optimizer_class,
-                hparams,
-                exp_name,
-                exp_key,
-                seed,
+            pending_specs.append(
+                (
+                    optimizer_class,
+                    {
+                        "hparams": hparams,
+                        "opt_name": opt_name,
+                        "seed": seed,
+                    },
+                )
             )
-            jobs.append((job, opt_name, seed))
 
     log.info(
         "Evaluation scheduled  jobs=%d  gpu/trial=%.2f  cpu/trial=%.1f  max_concurrent=%d",
-        len(jobs),
+        len(pending_specs),
         gpu_per_trial,
         cpu_per_trial,
         max_concurrent,
     )
 
-    for job, opt_name, seed in jobs:
+    def _submit(optimizer_class, spec: dict):
+        return _evaluate_single_seed_remote.options(
+            num_cpus=cpu_per_trial,
+            num_gpus=gpu_per_trial,
+        ).remote(
+            task_type,
+            dataset_name,
+            model_type,
+            cfg_obj,
+            train_ref,
+            val_ref,
+            test_ref,
+            n_features,
+            n_classes,
+            optimizer_class,
+            spec["hparams"],
+            exp_name,
+            exp_key,
+            spec["seed"],
+        )
+
+    active: dict[Any, dict] = {}
+    max_active = max(1, int(max_concurrent))
+    while pending_specs or active:
+        while pending_specs and len(active) < max_active:
+            optimizer_class, spec = pending_specs.pop(0)
+            job = _submit(optimizer_class, spec)
+            active[job] = spec
+
+        ready, _ = ray.wait(list(active.keys()), num_returns=1)
+        job = ready[0]
+        spec = active.pop(job)
+        opt_name = spec["opt_name"]
+        seed = spec["seed"]
         ms, mon = ray.get(job)
         telemetry_logger.log_summary(exp_key, opt_name, seed, mon)
         test_keys = _test_metric_keys(task_type)
@@ -1266,6 +1329,15 @@ def _run_experiment_pair(
             hparams["no_deprecation_warning"] = True
         tuned_pairs.append((opt_cls, hparams))
 
+    eval_gpu_per_trial, eval_cpu_per_trial, eval_max_concurrent = _evaluation_resources(
+        task_type,
+        model_type,
+        cfg_obj,
+        gpu_per_trial,
+        cpu_per_trial,
+        max_concurrent,
+    )
+
     # 4. Tuned multi-seed evaluation
     log.info("--- Tuned multi-seed evaluation ---")
     tuned_exp = f"tuned_{exp_name}"
@@ -1283,9 +1355,9 @@ def _run_experiment_pair(
         tuned_exp,
         telemetry_logger,
         exp_key,
-        gpu_per_trial,
-        cpu_per_trial,
-        max_concurrent,
+        eval_gpu_per_trial,
+        eval_cpu_per_trial,
+        eval_max_concurrent,
     )
     tuned_summary = _build_tuned_summary(tuned_seed_results, task_type, dataset_name=dataset_name)
     _save_df(tuned_summary, _result_path(cfg_obj.output_dir, exp_key, "tuned_summary.csv"))
@@ -1321,9 +1393,9 @@ def _run_experiment_pair(
         default_exp,
         telemetry_logger,
         exp_key,
-        gpu_per_trial,
-        cpu_per_trial,
-        max_concurrent,
+        eval_gpu_per_trial,
+        eval_cpu_per_trial,
+        eval_max_concurrent,
     )
     default_summary = _build_tuned_summary(default_seed_results, task_type, dataset_name=dataset_name)
     _save_df(default_summary, _result_path(cfg_obj.output_dir, exp_key, "default_summary.csv"))
@@ -1413,10 +1485,31 @@ def run_experiments(cfg_obj: ExperimentConfig) -> dict:
     log.info("=" * 60)
 
     all_results: dict[str, dict] = {}
+    resume_key = None
+    resume_reached = cfg_obj.resume_from_dataset is None
+    if cfg_obj.resume_from_dataset and cfg_obj.resume_from_model:
+        resume_key = f"{cfg_obj.resume_from_dataset}_{cfg_obj.resume_from_model}"
+        available_keys = {
+            f"{dataset_name}_{model_type}"
+            for dataset_name in cfg_obj.datasets
+            for model_type in cfg_obj.model_types
+        }
+        if resume_key not in available_keys:
+            raise ValueError(
+                f"resume key {resume_key!r} is not in configured experiment pairs: "
+                f"{sorted(available_keys)}"
+            )
+        log.info("RESUME_FROM  first experiment=%s", resume_key)
 
     for dataset_name in cfg_obj.datasets:
         for model_type in cfg_obj.model_types:
             exp_key = f"{dataset_name}_{model_type}"
+            if not resume_reached:
+                if exp_key == resume_key:
+                    resume_reached = True
+                else:
+                    log.info("Skipping %s before resume point %s", exp_key, resume_key)
+                    continue
             try:
                 result = _run_experiment_pair(
                     task_type,

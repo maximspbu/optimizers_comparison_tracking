@@ -266,12 +266,15 @@ def detect_gpu_resources(
     """
     total_cpus = os.cpu_count() or 4
 
-    if not torch.cuda.is_available() or n_gpus == 0:
+    detected_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    usable_gpus = min(max(0, n_gpus), detected_gpus)
+
+    if usable_gpus == 0:
         cpu_per = max(2.0, float(total_cpus) / 4)
         return 0.0, cpu_per, 4
 
     trials_per_gpu = 3 if task_type == "image_classification" else 4
-    max_concurrent = n_gpus * trials_per_gpu
+    max_concurrent = usable_gpus * trials_per_gpu
     gpu_per_trial = 1.0 / trials_per_gpu
     cpu_per_trial = max(1.0, float(total_cpus) / max_concurrent)
 
@@ -308,6 +311,15 @@ def setup(
     set_global_seed(seed)
     pd.set_option("display.max_colwidth", None)
     ray_cpus = n_cpus if n_cpus is not None else (os.cpu_count() or 4)
+    detected_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    ray_gpus = min(max(0, n_gpus), detected_gpus)
+    if n_gpus > detected_gpus:
+        log.warning(
+            "Requested n_gpus=%d but detected %d CUDA device(s); using %d.",
+            n_gpus,
+            detected_gpus,
+            ray_gpus,
+        )
     ray.shutdown()
     ray.init(
         runtime_env={
@@ -318,7 +330,7 @@ def setup(
         logging_level=logging.ERROR,
         log_to_driver=False,
         num_cpus=ray_cpus,
-        num_gpus=n_gpus if n_gpus > 0 else None,
+        num_gpus=ray_gpus if ray_gpus > 0 else None,
     )
     pprint(ray.cluster_resources())
     torch.set_num_threads(NUM_THREADS)

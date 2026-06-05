@@ -5,6 +5,8 @@ from __future__ import annotations
 import io
 import logging
 import os
+import shutil
+import sys
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -67,9 +69,24 @@ def download_kaggle_dataset(
     if kaggle_json:
         env["KAGGLE_CONFIG_DIR"] = str(Path(kaggle_json).parent)
 
+    cmd = ["kaggle", "datasets", "download", "-d", dataset_id, "-p", dest_dir, "--unzip"]
+    if shutil.which("kaggle") is None:
+        cmd = [
+            sys.executable,
+            "-m",
+            "kaggle",
+            "datasets",
+            "download",
+            "-d",
+            dataset_id,
+            "-p",
+            dest_dir,
+            "--unzip",
+        ]
+
     log.info("Downloading Kaggle dataset %s into %s ...", dataset_id, dest_dir)
     subprocess.run(
-        ["kaggle", "datasets", "download", "-d", dataset_id, "-p", dest_dir, "--unzip"],
+        cmd,
         check=True,
         env=env,
     )

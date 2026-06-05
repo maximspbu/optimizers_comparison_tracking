@@ -705,19 +705,19 @@ def load_image_dataset(
     if name == "intel":
         from torchvision.datasets import ImageFolder
 
-        # Build candidate paths including data_dir
-        train_paths = cfg["train_paths"] + [
-            f"{data_dir}/seg_train/seg_train",
-            f"{data_dir}/seg_train",
-            f"{data_dir}/intel-image-classification/seg_train/seg_train",
-            f"{data_dir}/intel-image-classification/seg_train",
-        ]
-        test_paths = cfg["test_paths"] + [
-            f"{data_dir}/seg_test/seg_test",
-            f"{data_dir}/seg_test",
-            f"{data_dir}/intel-image-classification/seg_test/seg_test",
-            f"{data_dir}/intel-image-classification/seg_test",
-        ]
+        def _intel_paths(split: str) -> list[str]:
+            nested = "seg_train" if split == "train" else "seg_test"
+            return cfg[f"{split}_paths"] + [
+                f"{data_dir}/{nested}/{nested}",
+                f"{data_dir}/{nested}",
+                f"{data_dir}/intel-image-classification/{nested}/{nested}",
+                f"{data_dir}/intel-image-classification/{nested}",
+                f"{data_dir}/intel-image-classification/intel-image-classification/{nested}/{nested}",
+                f"{data_dir}/intel-image-classification/intel-image-classification/{nested}",
+            ]
+
+        train_paths = _intel_paths("train")
+        test_paths = _intel_paths("test")
 
         train_dir = resolve_local_path(train_paths)
         if train_dir is None:
@@ -725,11 +725,21 @@ def load_image_dataset(
             from .downloader import download_kaggle_dataset
 
             log.info("Intel dataset not found; attempting Kaggle download...")
-            download_kaggle_dataset(
-                cfg["kaggle_dataset"],
-                f"{data_dir}/intel-image-classification",
-                kaggle_json=kaggle_json,
-            )
+            try:
+                download_kaggle_dataset(
+                    cfg["kaggle_dataset"],
+                    f"{data_dir}/intel-image-classification",
+                    kaggle_json=kaggle_json,
+                )
+            except Exception as e:
+                raise FileNotFoundError(
+                    f"Intel train dir not found and Kaggle download failed: {e}. "
+                    f"Checked: {train_paths}. "
+                    "Install the kaggle package/CLI with credentials, or place the dataset under "
+                    f"{data_dir}/intel-image-classification/seg_train/seg_train."
+                ) from e
+            train_paths = _intel_paths("train")
+            test_paths = _intel_paths("test")
             train_dir = resolve_local_path(train_paths)
             if train_dir is None:
                 raise FileNotFoundError(
